@@ -4620,6 +4620,7 @@ dependencies = [
  "log",
  "martin-core",
  "martin-tile-utils",
+ "martin-tiler",
  "mbtiles",
  "miette",
  "mlt-core",
@@ -4730,6 +4731,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "zstd",
+]
+
+[[package]]
+name = "martin-tiler"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures",
+ "martin-tile-utils",
+ "mbtiles",
+ "regex",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

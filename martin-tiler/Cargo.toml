@@ -1,0 +1,43 @@
+[package]
+name = "martin-tiler"
+version = "0.1.0"
+description = "GDAL-backed tile-map generation engine for Martin: mosaic + reproject multiple GeoTIFFs into a single sparse tile pyramid (z/x/y, MBTiles)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "martin-tiler"
+path = "src/bin/martin-tiler.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# Command-line front-end (clap + a tokio runtime)
+cli = ["dep:clap", "tokio/rt-multi-thread", "tokio/macros"]
+# Generate `schemars`/serde JSON schema for the public model types (used by the server/UI)
+unstable-schemas = ["dep:schemars"]
+
+[dependencies]
+futures.workspace = true
+mbtiles.workspace = true
+martin-tile-utils.workspace = true
+regex.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+schemars = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "io-util", "sync", "rt"] }
+tracing.workspace = true
+clap = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

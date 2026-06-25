@@ -152,6 +152,16 @@ fn register_services(
     cfg.service(styles::get_style_json)
         .service(styles::redirect_styles);
 
+    #[cfg(feature = "studio")]
+    cfg.service(crate::srv::studio::get_studio_config)
+        .service(crate::srv::studio::browse)
+        .service(crate::srv::studio::upload)
+        .service(crate::srv::studio::inspect)
+        .service(crate::srv::studio::start_generate)
+        .service(crate::srv::studio::list_jobs)
+        .service(crate::srv::studio::get_job)
+        .service(crate::srv::studio::validate_map);
+
     // `.jpeg` redirects must register before the main routes so they win.
     #[cfg(all(feature = "rendering", target_os = "linux"))]
     cfg.service(styles_static::redirect_static_jpeg)
@@ -214,6 +224,10 @@ pub fn new_server(
         &state,
     )?;
 
+    // Tile Map Studio shares one state (GDAL toolchain + job registry) across all workers.
+    #[cfg(feature = "studio")]
+    let studio_state = Data::new(crate::srv::studio::StudioState::from_env());
+
     let keep_alive = Duration::from_secs(config.keep_alive.unwrap_or(DEFAULT_KEEP_ALIVE));
     let worker_processes = config.worker_processes.unwrap_or_else(num_cpus::get);
     let listen_addresses = config
@@ -247,6 +261,13 @@ pub fn new_server(
 
         #[cfg(feature = "styles")]
         let app = app.app_data(Data::new(state.styles.clone()));
+
+        #[cfg(feature = "studio")]
+        let app = app
+            .app_data(studio_state.clone())
+            // GeoTIFF uploads arrive as a raw octet-stream body read via `web::Bytes`;
+            // bump the payload limit well above Actix's 256 KiB default.
+            .app_data(web::PayloadConfig::new(2 * 1024 * 1024 * 1024));
 
         let app = app.wrap(middleware::Condition::new(
             cors_middleware.is_some(),

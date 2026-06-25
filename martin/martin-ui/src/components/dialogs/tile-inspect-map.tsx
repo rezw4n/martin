@@ -89,6 +89,37 @@ function applyUnderlay(map: MapLibre, underlayId: UnderlayProviderId | undefined
   );
 }
 
+// Fit/zoom the viewport to the source's geographic extent. Used by both the
+// raster and vector branches once the TileJSON has resolved. tilejson `bounds`
+// is [west, south, east, north]; maplibre fitBounds wants [[w,s],[e,n]].
+function fitToBounds(map: MapLibre, tileJson: TileJson) {
+  if (typeof tileJson.minzoom === 'number') {
+    map.setMinZoom(tileJson.minzoom);
+  }
+  if (typeof tileJson.maxzoom === 'number') {
+    map.setMaxZoom(tileJson.maxzoom);
+  }
+  if (tileJson.bounds) {
+    const [west, south, east, north] = tileJson.bounds;
+    map.fitBounds(
+      [
+        [west, south],
+        [east, north],
+      ],
+      {
+        duration: 0,
+        maxZoom: typeof tileJson.maxzoom === 'number' ? tileJson.maxzoom : 17,
+        padding: 32,
+      },
+    );
+  } else if (tileJson.center) {
+    map.setCenter([tileJson.center[0], tileJson.center[1]]);
+    if (typeof tileJson.minzoom === 'number') {
+      map.setZoom(tileJson.minzoom);
+    }
+  }
+}
+
 export function TileInspectDialogMap({ name, source }: TileInspectDialogMapProps) {
   const { toast } = useToast();
   const id = useId();
@@ -121,6 +152,16 @@ export function TileInspectDialogMap({ name, source }: TileInspectDialogMapProps
     }
   }, [selectedUnderlay]);
 
+  // onLoad fires before the TileJSON fetch resolves, so the initial
+  // configureMap() call cannot fit the viewport. Once the TileJSON arrives,
+  // fit the map (raster and vector alike) to its bounds/zoom range.
+  useEffect(() => {
+    const map = mapRef.current?.getMap();
+    if (map && tileJsonOperation.data) {
+      fitToBounds(map, tileJsonOperation.data);
+    }
+  }, [tileJsonOperation.data]);
+
   const configureMap = () => {
     if (!mapRef.current) {
       console.error('Map not found despite being initialized, this cannot happen');
@@ -146,16 +187,7 @@ export function TileInspectDialogMap({ name, source }: TileInspectDialogMapProps
         ]);
       }
     }
-    if (tileJson.minzoom) {
-      map.setMinZoom(tileJson.minzoom);
-      map.setZoom(tileJson.minzoom);
-    }
-    if (tileJson.maxzoom) {
-      map.setMaxZoom(tileJson.maxzoom);
-    }
-    if (tileJson.center) {
-      map.setCenter([tileJson.center[0], tileJson.center[1]]);
-    }
+    fitToBounds(map, tileJson);
   };
 
   const addInspectorToMap = () => {
@@ -234,7 +266,12 @@ export function TileInspectDialogMap({ name, source }: TileInspectDialogMapProps
               width: '100%',
             }}
           >
-            <Source id={`${id}tile-source`} type="raster" url={buildMartinUrl(`/${name}`)} />
+            <Source
+              id={`${id}tile-source`}
+              tileSize={256}
+              tiles={[`${buildMartinUrl(`/${name}`)}/{z}/{x}/{y}`]}
+              type="raster"
+            />
             <Layer id={`${id}tile-layer`} source={`${id}tile-source`} type="raster" />
           </MapLibreMap>
         ) : (

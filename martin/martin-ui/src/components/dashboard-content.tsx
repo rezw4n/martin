@@ -4,6 +4,7 @@ import { SpriteCatalog } from '@/components/catalogs/sprite';
 import { StylesCatalog } from '@/components/catalogs/styles';
 import { ErrorBoundary } from '@/components/error/error-boundary';
 import { StyleEditor } from '@/components/style-editor';
+import { TileMapStudio } from '@/components/studio/tile-map-studio';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Toaster } from '@/components/ui/toaster';
 import { useAsyncOperation } from '@/hooks/use-async-operation';
@@ -77,7 +78,10 @@ export function DashboardContent() {
         onValueChange={(value) => updateParam('tab', value)}
         value={params.tab}
       >
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-5">
+          <TabsTrigger value="studio">
+            Tile Map<span className="md:block hidden ms-1">Studio</span>
+          </TabsTrigger>
           <TabsTrigger value="tiles">
             Tiles<span className="md:block hidden ms-1">Catalog</span>
           </TabsTrigger>
@@ -91,6 +95,10 @@ export function DashboardContent() {
             Sprites<span className="md:block hidden ms-1">Catalog</span>
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="studio">
+          <TileMapStudio />
+        </TabsContent>
 
         <TabsContent value="tiles">
           <TilesCatalog

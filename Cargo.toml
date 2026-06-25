@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["martin", "martin-core", "martin-tile-utils", "mbtiles"]
+members = ["martin", "martin-core", "martin-tile-utils", "martin-tiler", "mbtiles"]
 
 [workspace.package]
 edition = "2024"
@@ -99,6 +99,7 @@ log = "0.4"
 maplibre_native = "0.8.3"
 martin-core = { path = "./martin-core", version = "0.8.0", default-features = false }
 martin-tile-utils = { path = "./martin-tile-utils", version = "0.7.4" }
+martin-tiler = { path = "./martin-tiler", version = "0.1.0", default-features = false }
 mbtiles = { path = "./mbtiles", version = "0.18.0" }
 md5 = "0.8.0"
 miette = { version = "7.6", features = ["fancy"] }

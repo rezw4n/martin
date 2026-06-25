@@ -18,6 +18,11 @@ pub use server::{RESERVED_KEYWORDS, new_server, router};
 
 mod admin;
 pub use admin::Catalog;
+
+#[cfg(feature = "studio")]
+pub mod studio;
+#[cfg(feature = "studio")]
+pub use studio::StudioState;
 #[cfg(feature = "unstable-schemas")]
 pub use admin::{__path_get_catalog, get_catalog};
 

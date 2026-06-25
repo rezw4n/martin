@@ -31,6 +31,7 @@ cache.sqlite*
 config.yml
 coverage
 pg_data/
+studio-maps/
 target/
 test_log*
 tests/mbtiles_temp_files/
