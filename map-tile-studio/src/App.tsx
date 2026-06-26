@@ -60,6 +60,36 @@ type Phase = 'idle' | 'generating' | 'done';
 type PrimaryGrid = 'web-mercator' | 'geodetic';
 type OutputType = 'mbtiles' | 'cog';
 
+/** Friendly label + one-line explanation per resampling kernel. Resampling only
+ *  affects the zoomed-out / overview levels — the native level is never resampled. */
+const RESAMPLING_INFO: Record<ResamplingId, { name: string; label: string; desc: string }> = {
+  near: {
+    name: 'Nearest',
+    label: 'Nearest — no blending',
+    desc: 'Copies the closest source pixel; never blends or invents values. Best for categorical/indexed data — and the closest thing to “no resampling”.',
+  },
+  bilinear: {
+    name: 'Bilinear',
+    label: 'Bilinear',
+    desc: 'Smooth blend of the 4 nearest pixels. A safe default for aerial/satellite imagery and DEMs.',
+  },
+  cubic: {
+    name: 'Cubic',
+    label: 'Cubic',
+    desc: 'Sharper blend over 16 pixels — crisper detail, with slight edge ringing.',
+  },
+  average: {
+    name: 'Average',
+    label: 'Average',
+    desc: 'Averages every covered pixel. Faithful, low-aliasing downsampling of continuous data.',
+  },
+  lanczos: {
+    name: 'Lanczos',
+    label: 'Lanczos',
+    desc: 'Highest-quality sharp downsampling (36 pixels); slowest, can ring at hard edges.',
+  },
+};
+
 interface ProgressState {
   stage: string;
   index: number;
@@ -684,7 +714,7 @@ function OutputSection(props: {
             >
               {(['near', 'bilinear', 'cubic', 'average', 'lanczos'] as ResamplingId[]).map((r) => (
                 <option key={r} value={r}>
-                  {r}
+                  {RESAMPLING_INFO[r].label}
                 </option>
               ))}
             </select>
@@ -702,6 +732,14 @@ function OutputSection(props: {
           </div>
         </Field>
       </div>
+
+      {/* full-width explanation of the selected resampling kernel */}
+      <p className="rounded-[9px] border border-[#eef0f3] bg-[#fafbfc] px-3 py-2 text-[11.5px] leading-snug text-muted">
+        <span className="font-semibold text-ink-soft">
+          Resampling ({RESAMPLING_INFO[props.resampling].name}):
+        </span>{' '}
+        {RESAMPLING_INFO[props.resampling].desc}
+      </p>
 
       {!isCog && (
         <Field hint="blank = auto · native res, 8 levels deep" label="Zoom range">
