@@ -86,7 +86,7 @@ export async function importMaps(): Promise<number> {
 
 /** A single representative tile (the overview tile at min-zoom) as a thumbnail. */
 export function tileThumbUrl(base: string, e: MapEntry): string | null {
-  if (!base || e.kind !== 'mbtiles' || !e.bounds || e.min_zoom == null) return null;
+  if (!base || !e.bounds || e.min_zoom == null) return null;
   const [w, s, ee, n] = e.bounds;
   const lon = (w + ee) / 2;
   const lat = (s + n) / 2;

@@ -221,6 +221,14 @@ export default function App() {
           maxZoom: previewOut.max_zoom,
         });
         validate(previewOut.mbtiles_path).then(setValidation).catch(() => {});
+      } else if (rep.cog_output) {
+        // COG-only run: preview the single COG via the local tile server too.
+        const c = rep.cog_output;
+        setPreview({
+          url: tileUrlTemplate(tileBase, c.source_id),
+          bounds: c.bounds_wgs84,
+          maxZoom: c.max_zoom ?? 20,
+        });
       }
       setPhase('done');
     } catch (e) {
@@ -683,7 +691,7 @@ function OutputSection(props: {
       </div>
 
       {!isCog && (
-        <Field hint="blank = auto" label="Zoom range">
+        <Field hint="blank = auto · native res, 8 levels deep" label="Zoom range">
           <div className="flex items-center gap-2.5">
             <TextInput
               mono

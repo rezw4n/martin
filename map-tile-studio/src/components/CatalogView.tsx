@@ -29,13 +29,14 @@ import { cn, formatBytes } from '@/lib/utils';
 import { MapCanvas } from '@/components/MapCanvas';
 import { Badge, Button } from '@/components/ui';
 
-/** Build a MapCanvas tile-preview from a catalog entry (MBTiles only — a COG
- *  isn't a tile pyramid the XYZ server can serve). */
+/** Build a MapCanvas tile-preview from a catalog entry. Both MBTiles and a
+ *  web-mercator COG are served as XYZ tiles by the local server; we just need a
+ *  zoom range + bounds (a non-COG GeoTIFF that couldn't be read has neither). */
 function entryPreview(
   base: string,
   e: MapEntry,
 ): { url: string; bounds: BBox; maxZoom: number } | null {
-  if (!base || e.kind !== 'mbtiles' || !e.bounds || e.max_zoom == null) return null;
+  if (!base || !e.bounds || e.max_zoom == null) return null;
   const [w, s, ee, n] = e.bounds;
   return {
     url: tileUrlTemplate(base, e.source_id),
@@ -44,9 +45,10 @@ function entryPreview(
   };
 }
 
-/** The copyable XYZ tile URL for an entry (null for COG / before server ready). */
+/** The copyable XYZ tile URL for a servable entry (null before the server is
+ *  ready, or for a file that couldn't be read as tiles). */
 function entryTileUrl(base: string, e: MapEntry): string | null {
-  if (!base || e.kind !== 'mbtiles') return null;
+  if (!base || !e.bounds) return null;
   return tileUrlTemplate(base, e.source_id);
 }
 
@@ -309,19 +311,6 @@ function PreviewOverlay({
 }) {
   const pv = entryPreview(tileBase, entry);
   const url = entryTileUrl(tileBase, entry);
-  const probe = tileThumbUrl(tileBase, entry); // a concrete z/x/y tile URL
-  const [diag, setDiag] = useState<string>('');
-  const [imgOk, setImgOk] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!probe) {
-      setDiag('no tile url');
-      return;
-    }
-    setDiag('fetching…');
-    fetch(probe)
-      .then((r) => setDiag(`fetch ${r.status} ${r.headers.get('content-type') ?? ''}`))
-      .catch((e) => setDiag(`fetch ERROR: ${String(e)}`));
-  }, [probe]);
   return (
     <motion.div
       animate={{ opacity: 1 }}
@@ -364,27 +353,6 @@ function PreviewOverlay({
       </div>
 
       <div className="relative min-h-0 flex-1">
-        {pv && probe && (
-          <div className="absolute bottom-9 left-3 z-10 flex items-center gap-2 rounded-lg border border-line bg-white/95 px-2.5 py-1.5 font-mono text-[10.5px] text-ink shadow-md backdrop-blur">
-            <span className="text-faint">diag:</span>
-            <span>{diag}</span>
-            <span className="text-faint">img:</span>
-            {imgOk === null ? (
-              <span className="text-faint">…</span>
-            ) : imgOk ? (
-              <span className="text-ok">OK</span>
-            ) : (
-              <span className="text-danger">FAIL</span>
-            )}
-            <img
-              alt="probe"
-              className="size-6 rounded border border-line"
-              onError={() => setImgOk(false)}
-              onLoad={() => setImgOk(true)}
-              src={probe}
-            />
-          </div>
-        )}
         {pv ? (
           <MapCanvas footprints={[]} preview={pv} selectedPaths={new Set()} />
         ) : (
@@ -393,10 +361,10 @@ function PreviewOverlay({
               <Layers className="size-7 text-[#9aa6b6]" />
             </div>
             <div>
-              <div className="font-semibold text-[14px] text-ink">No in-app preview for a COG</div>
+              <div className="font-semibold text-[14px] text-ink">No preview available</div>
               <div className="mt-1 max-w-sm text-[12.5px] leading-relaxed text-muted">
-                A Cloud-Optimized GeoTIFF isn't a tile pyramid, so it can't be drawn on the offline
-                preview map. Open it in a desktop GIS (QGIS, ArcGIS) or your tile server.
+                Couldn't read tiles for this file (it may not be a web-mercator tile map). Open it in
+                a desktop GIS (QGIS, ArcGIS) instead.
               </div>
             </div>
             <Button onClick={() => revealInExplorer(entry.path)} variant="secondary">

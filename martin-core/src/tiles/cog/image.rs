@@ -4,7 +4,7 @@ use std::path::Path;
 
 use martin_tile_utils::{Format, TileCoord, TileData};
 use tiff::ColorType;
-use tiff::decoder::Decoder;
+use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::CompressionMethod;
 
 use crate::tiles::cog::CogError;
@@ -98,21 +98,44 @@ impl Image {
             return self.read_raw_tile_bytes(decoder, idx, path);
         }
 
-        // For other compression types (LZW, Deflate, None), decode and re-encode as PNG
+        // For other compression types (LZW, Deflate, None), decode and re-encode as PNG.
         let color_type = decoder
             .colortype()
             .map_err(|e| CogError::InvalidTiffFile(e, path.to_path_buf()))?;
+        let samples = u32::from(color_type.num_samples());
+        let ts = self.tile_size;
 
-        let mut pixels = vec![
-            0;
-            (self.tile_size * self.tile_size * u32::from(color_type.num_samples()))
-                as usize
-        ];
-        if decoder.read_chunk_bytes(idx, &mut pixels).is_err() {
-            return Ok(Vec::new());
-        }
+        // The decoder reports a chunk's *data* dimensions — the size minus edge
+        // padding — and packs its rows at that (possibly clipped) stride. Edge
+        // tiles (right column / bottom row, and most tiles on small overviews) are
+        // therefore narrower/shorter than `tile_size`. We must decode at the true
+        // chunk size and pad up to a full `tile_size`×`tile_size` tile; encoding the
+        // clipped data as if it were `tile_size`-wide skews every row and produces
+        // the diagonal "striping" artifact (worst at low zoom).
+        let (cw, ch) = decoder.chunk_data_dimensions(idx);
+        let chunk = match decoder.read_chunk(idx) {
+            Ok(DecodingResult::U8(v)) => v,
+            // empty/sparse chunk or an unsupported bit depth -> treat as a blank tile
+            _ => return Ok(Vec::new()),
+        };
 
-        let png = encode_as_png(self.tile_size(), &pixels, path, color_type)?;
+        let pixels = if cw == ts && ch == ts {
+            chunk
+        } else {
+            let src_stride = (cw * samples) as usize;
+            let dst_stride = (ts * samples) as usize;
+            let copy = src_stride.min(dst_stride);
+            let mut padded = vec![0u8; (ts * ts * samples) as usize];
+            for row in 0..(ch.min(ts) as usize) {
+                let (s, d) = (row * src_stride, row * dst_stride);
+                if s + copy <= chunk.len() {
+                    padded[d..d + copy].copy_from_slice(&chunk[s..s + copy]);
+                }
+            }
+            padded
+        };
+
+        let png = encode_as_png(ts, &pixels, path, color_type)?;
         Ok(png)
     }
 
