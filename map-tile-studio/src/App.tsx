@@ -44,6 +44,7 @@ import { cn, formatBytes } from '@/lib/utils';
 import { CatalogView } from '@/components/CatalogView';
 import { MapCanvas } from '@/components/MapCanvas';
 import { ServingView } from '@/components/ServingView';
+import { Sidebar } from '@/components/Sidebar';
 import { Titlebar, type Tab } from '@/components/Titlebar';
 import {
   Badge,
@@ -266,14 +267,22 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-white text-ink">
-      <Titlebar onTab={setTab} status={statusPill} tab={tab} />
+      <Titlebar status={statusPill} />
 
-      {tab === 'catalog' && (
-        <CatalogView onOpenInStudio={() => setTab('studio')} tileBase={tileBase} />
-      )}
-      {tab === 'serving' && <ServingView />}
+      <div className="flex min-h-0 flex-1">
+        <Sidebar onTab={setTab} tab={tab} />
 
-      <div className={cn('min-h-0 flex-1', tab === 'studio' ? 'flex' : 'hidden')}>
+        <div className="flex min-h-0 flex-1 flex-col">
+          {tab === 'catalog' && (
+            <CatalogView
+              gdalReady={gdal?.available}
+              onOpenInStudio={() => setTab('studio')}
+              tileBase={tileBase}
+            />
+          )}
+          {tab === 'serving' && <ServingView />}
+
+          <div className={cn('min-h-0 flex-1', tab === 'studio' ? 'flex' : 'hidden')}>
         {/* ── docked panel ─────────────────────────────────────────────── */}
         <aside className="flex w-[400px] flex-none flex-col border-r border-line bg-white">
           <AnimatePresence initial={false} mode="wait">
@@ -400,6 +409,8 @@ export default function App() {
             )}
           </AnimatePresence>
         </main>
+          </div>
+        </div>
       </div>
     </div>
   );

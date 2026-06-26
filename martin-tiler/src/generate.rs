@@ -567,6 +567,8 @@ async fn write_metadata(
         ("bounds", format!("{},{},{},{}", bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y)),
         ("center", format!("{center_lon},{center_lat},{min_zoom}")),
         ("crs", format!("EPSG:{}", grid.epsg())),
+        // How many source GeoTIFFs were stitched into this map (shown in the catalog).
+        ("mts_sources", opts.inputs.len().to_string()),
     ];
 
     // For a custom projected grid, persist what a custom-tile-grid client (OpenLayers) needs.

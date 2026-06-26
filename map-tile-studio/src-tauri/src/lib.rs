@@ -120,6 +120,8 @@ struct MapEntry {
     min_zoom: Option<u32>,
     max_zoom: Option<u32>,
     tiles_total: Option<u64>,
+    /// Number of source GeoTIFFs stitched into this map (MBTiles only).
+    sources: Option<u32>,
     bounds: Option<[f64; 4]>,
     size: u64,
     modified: u64,
@@ -150,6 +152,7 @@ fn read_mbtiles_entry(path: &Path) -> MapEntry {
         min_zoom: None,
         max_zoom: None,
         tiles_total: None,
+        sources: None,
         bounds: None,
         size,
         modified,
@@ -182,6 +185,7 @@ fn read_mbtiles_entry(path: &Path) -> MapEntry {
             .query_row("SELECT count(*) FROM tiles", [], |r| r.get::<_, i64>(0))
             .ok()
             .map(|n| n as u64);
+        e.sources = get("mts_sources").and_then(|s| s.parse().ok());
     }
     e
 }
@@ -210,6 +214,7 @@ fn read_cog_entry(path: &Path) -> MapEntry {
         min_zoom: None,
         max_zoom: None,
         tiles_total: None,
+        sources: None,
         bounds: None,
         size,
         modified,

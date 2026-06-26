@@ -123,6 +123,8 @@ export interface MapEntry {
   min_zoom: number | null;
   max_zoom: number | null;
   tiles_total: number | null;
+  /** Source GeoTIFFs stitched into this map (MBTiles only). */
+  sources: number | null;
   bounds: [number, number, number, number] | null;
   size: number;
   modified: number;

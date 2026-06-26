@@ -30,21 +30,8 @@ function LayersMark({ className }: { className?: string }) {
 
 export type Tab = 'studio' | 'catalog' | 'serving';
 
-export function Titlebar({
-  status,
-  tab,
-  onTab,
-}: {
-  status: React.ReactNode;
-  tab: Tab;
-  onTab: (t: Tab) => void;
-}) {
+export function Titlebar({ status }: { status: React.ReactNode }) {
   const win = getCurrentWindow();
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'studio', label: 'Studio' },
-    { id: 'catalog', label: 'Tiles Catalog' },
-    { id: 'serving', label: 'Serving' },
-  ];
   return (
     <header
       className="relative z-30 flex h-12 flex-none items-center gap-3 border-b border-line bg-[#fbfbfc] pr-1 pl-4"
@@ -59,25 +46,6 @@ export function Titlebar({
           <div className="font-medium text-[10px] tracking-[0.02em] text-faint">by AiGeoLAB</div>
         </div>
       </div>
-
-      {/* tabs */}
-      <nav className="ml-4 flex items-center gap-1">
-        {tabs.map((t) => (
-          <button
-            className={cn(
-              'h-8 rounded-lg px-3.5 font-medium text-[13px] transition-colors',
-              tab === t.id
-                ? 'bg-brand-tint text-brand'
-                : 'text-muted hover:bg-[#f1f2f5] hover:text-ink-soft',
-            )}
-            key={t.id}
-            onClick={() => onTab(t.id)}
-            type="button"
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
 
       <div className="flex-1" data-tauri-drag-region />
 

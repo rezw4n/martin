@@ -97,9 +97,11 @@ function relTime(unixSecs: number): string {
 export function CatalogView({
   onOpenInStudio,
   tileBase,
+  gdalReady,
 }: {
   onOpenInStudio?: () => void;
   tileBase: string;
+  gdalReady?: boolean;
 }) {
   const [maps, setMaps] = useState<MapEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,6 +111,8 @@ export function CatalogView({
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<MapEntry | null>(null);
+  // Pending delete awaiting confirmation ({ paths, label }).
+  const [confirmDel, setConfirmDel] = useState<{ paths: string[]; label: string } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -226,7 +230,12 @@ export function CatalogView({
             </div>
             <div className="flex-1" />
             <Button
-              onClick={() => onDelete(selectedList.map((m) => m.path))}
+              onClick={() =>
+                setConfirmDel({
+                  paths: selectedList.map((m) => m.path),
+                  label: `${selectedList.length} tile map${selectedList.length === 1 ? '' : 's'}`,
+                })
+              }
               size="sm"
               variant="secondary"
             >
@@ -253,7 +262,7 @@ export function CatalogView({
               <MapCard
                 entry={m}
                 key={m.path}
-                onDelete={() => onDelete([m.path])}
+                onDelete={() => setConfirmDel({ paths: [m.path], label: m.name })}
                 onOpen={() => setPreview(m)}
                 onReveal={() => revealInExplorer(m.path)}
                 onToggle={() => toggle(m.path)}
@@ -290,13 +299,103 @@ export function CatalogView({
         </div>
       )}
 
+      {/* bottom status bar */}
+      <div className="flex flex-none items-center gap-3 border-line border-t bg-white px-7 py-2 text-[11.5px]">
+        <a
+          className="font-medium text-brand hover:underline"
+          href="https://ai-geolab.org"
+          rel="noreferrer"
+          target="_blank"
+        >
+          © AiGeoLAB · ai-geolab.org
+        </a>
+        <span className="flex-1" />
+        <span className="font-mono text-muted">
+          {maps.length} map{maps.length === 1 ? '' : 's'} · {formatBytes(totalSize)} on disk
+        </span>
+        <span className="flex items-center gap-1.5 text-muted">
+          <span
+            className={cn('size-1.5 rounded-full', gdalReady ? 'bg-ok mts-pulse' : 'bg-[#cdd5e0]')}
+          />
+          {gdalReady === false ? 'GDAL missing' : 'GDAL ready'}
+        </span>
+      </div>
+
       {/* preview overlay */}
       <AnimatePresence>
         {preview && (
           <PreviewOverlay entry={preview} onClose={() => setPreview(null)} tileBase={tileBase} />
         )}
       </AnimatePresence>
+
+      {/* delete confirmation */}
+      <AnimatePresence>
+        {confirmDel && (
+          <ConfirmDelete
+            busy={busy}
+            label={confirmDel.label}
+            onCancel={() => setConfirmDel(null)}
+            onConfirm={async () => {
+              const { paths } = confirmDel;
+              setConfirmDel(null);
+              await onDelete(paths);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
+  );
+}
+
+/** Centered confirmation modal for deleting a map (or several). */
+function ConfirmDelete({
+  label,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  label: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <motion.div
+      animate={{ opacity: 1 }}
+      className="absolute inset-0 z-50 flex items-center justify-center bg-ink/30 backdrop-blur-[2px]"
+      exit={{ opacity: 0 }}
+      initial={{ opacity: 0 }}
+      onClick={onCancel}
+      transition={{ duration: 0.14 }}
+    >
+      <motion.div
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        className="w-[380px] rounded-[16px] border border-line bg-white p-5 shadow-[0_24px_64px_-16px_rgba(16,24,40,.4)]"
+        exit={{ opacity: 0, scale: 0.96, y: 6 }}
+        initial={{ opacity: 0, scale: 0.96, y: 6 }}
+        onClick={(e) => e.stopPropagation()}
+        transition={{ duration: 0.16, ease: 'easeOut' }}
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex size-10 flex-none items-center justify-center rounded-full bg-danger-tint">
+            <Trash2 className="size-[18px] text-danger" />
+          </div>
+          <div className="font-semibold text-[15px] text-ink">Delete tile map?</div>
+        </div>
+        <p className="mt-3 text-[13px] leading-relaxed text-muted">
+          Are you sure you would like to delete <span className="font-semibold text-ink">{label}</span>?
+          This permanently removes the file from disk and can't be undone.
+        </p>
+        <div className="mt-5 flex justify-end gap-2.5">
+          <Button onClick={onCancel} variant="secondary">
+            Cancel
+          </Button>
+          <Button busy={busy} className="bg-danger text-white hover:bg-[#c0322f]" onClick={onConfirm}>
+            <Trash2 className="size-4" /> Yes, delete
+          </Button>
+        </div>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -464,6 +563,12 @@ function MapCard({
         <span className="absolute top-2.5 right-2.5 rounded-md bg-white/90 px-1.5 py-0.5 font-semibold text-[10px] text-muted uppercase backdrop-blur">
           {m.format}
         </span>
+        {m.sources != null && (
+          <span className="absolute bottom-2.5 left-2.5 flex items-center gap-1.5 rounded-full bg-white/90 px-2 py-1 font-medium text-[10.5px] text-ink-soft shadow-sm backdrop-blur">
+            <span className="size-1.5 rounded-full bg-brand" />
+            {m.sources} source{m.sources === 1 ? '' : 's'}
+          </span>
+        )}
       </div>
 
       {/* body */}
