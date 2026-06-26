@@ -200,9 +200,11 @@ pub async fn generate(
         let source_id = format!("{}-cog", sanitize(&opts.name));
         let cog_path = opts.output_dir.join(format!("{source_id}.tif"));
         let _ = std::fs::remove_file(&cog_path);
-        build_cog(gdal, &mosaic_vrt, &cog_path, opts, &mut on_progress).await?;
+        let aligned_levels = cog_aligned_levels(&combined_wgs84, native_zoom);
+        build_cog(gdal, &mosaic_vrt, &cog_path, opts, aligned_levels, &mut on_progress).await?;
         let info = inspect_one(gdal, &cog_path).await.ok();
-        let bounds = info.as_ref().map_or(combined_wgs84, |i| i.bounds_wgs84);
+        // Fit/report the *data* bounds, not the COG's grid-aligned (slightly padded) extent.
+        let bounds = combined_wgs84;
         let file_size = std::fs::metadata(&cog_path).map(|m| m.len()).unwrap_or(0);
         let format = match opts.format {
             TileFormat::Webp => "webp",
@@ -353,6 +355,7 @@ async fn build_cog(
     mosaic_vrt: &Path,
     out_cog: &Path,
     opts: &GenerateOptions,
+    aligned_levels: u32,
     on_progress: &mut impl FnMut(ProgressEvent),
 ) -> TilerResult<()> {
     // COG can't store PNG internally; use lossless DEFLATE for "png", lossy WEBP for "webp".
@@ -365,6 +368,10 @@ async fn build_cog(
         "COG".to_string(),
         "-co".to_string(),
         "TILING_SCHEME=GoogleMapsCompatible".to_string(),
+        // Align EVERY overview to the XYZ grid (GDAL aligns only the base level by
+        // default), so the COG serves tile-for-tile without per-zoom shifting.
+        "-co".to_string(),
+        format!("ALIGNED_LEVELS={aligned_levels}"),
         "-co".to_string(),
         format!("COMPRESS={compress}"),
         "-co".to_string(),
@@ -380,6 +387,29 @@ async fn build_cog(
     args.push(out_cog.to_string_lossy().into_owned());
     let tool = gdal.tool("gdal_translate");
     gdal.run_streaming(&tool, &args, |line| emit_line(on_progress, "cog", line)).await
+}
+
+/// How many COG overview levels to grid-align (the `ALIGNED_LEVELS` option): as
+/// many as the data spans, from the native-resolution zoom down to a single tile,
+/// plus one for safety. Keeping it matched to the data avoids padding the COG's
+/// extent (which would otherwise inflate the served bounds for a small image).
+fn cog_aligned_levels(bounds: &BBox, native_zoom: Option<u8>) -> u32 {
+    let world_tiles = 2f64.powi(i32::from(native_zoom.unwrap_or(18)));
+    let merc_y = |lat: f64| {
+        let r: f64 = lat.to_radians();
+        (1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0
+    };
+    let span_x = (bounds.max_x - bounds.min_x).abs() / 360.0;
+    let span_y = (merc_y(bounds.min_y) - merc_y(bounds.max_y)).abs();
+    let span_tiles = (span_x.max(span_y) * world_tiles).max(1.0);
+    // ceil(log2(span_tiles)) + 1, by integer doubling (no float->int casts), clamped.
+    let mut levels = 1u32;
+    let mut covered = 1.0_f64;
+    while covered < span_tiles && levels < 14 {
+        covered *= 2.0;
+        levels += 1;
+    }
+    levels
 }
 
 /// Emit a log line, and a percent event when one can be parsed.
