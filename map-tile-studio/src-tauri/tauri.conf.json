@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Map Tile Studio",
+  "version": "1.0.0",
+  "identifier": "org.aigeolab.maptilestudio",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Map Tile Studio",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "decorations": false,
+        "resizable": true,
+        "center": true,
+        "backgroundColor": "#ffffff"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' http://mbtile.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://mbtile.localhost ipc: http://ipc.localhost https:; worker-src 'self' blob:; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "copyright": "© AiGeoLAB · ai-geolab.org",
+    "category": "Productivity",
+    "shortDescription": "Build sparse tile maps from GeoTIFFs",
+    "longDescription": "Map Tile Studio by AiGeoLAB turns multiple GeoTIFF images into a single, integrated, sparse tile map. Empty areas produce no blank tiles.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
