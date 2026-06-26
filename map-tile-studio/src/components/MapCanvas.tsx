@@ -59,13 +59,25 @@ function unionBounds(files: RasterInfo[]): BBox | null {
   );
 }
 
+export interface VectorPreview {
+  /** `{z}/{x}/{y}` MVT (pbf) URL template. */
+  tilesUrl: string;
+  /** MVT source-layer name (the table name). */
+  sourceLayer: string;
+  /** PostGIS geometry type (e.g. `MULTIPOLYGON`) — picks fill/line/circle. */
+  geomType: string;
+  bounds: BBox;
+  maxZoom: number;
+}
+
 export interface MapCanvasProps {
   footprints: RasterInfo[];
   selectedPaths: Set<string>;
   preview: { url: string; bounds: BBox; maxZoom: number } | null;
+  vector?: VectorPreview | null;
 }
 
-export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps) {
+export function MapCanvas({ footprints, selectedPaths, preview, vector }: MapCanvasProps) {
   const mapRef = useRef<MapRef>(null);
   const [hover, setHover] = useState<{ lng: number; lat: number; zoom: number } | null>(null);
   const geojson = useMemo(
@@ -73,11 +85,13 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
     [footprints, selectedPaths],
   );
 
-  // fit to preview bounds, else to footprint union
-  const fitTarget = preview?.bounds ?? unionBounds(footprints);
+  // fit to preview bounds (raster, then vector), else to footprint union
+  const fitTarget = preview?.bounds ?? vector?.bounds ?? unionBounds(footprints);
   const fitKey = preview
     ? `p:${preview.url}`
-    : footprints.map((f) => f.path).join('|');
+    : vector
+      ? `v:${vector.tilesUrl}`
+      : footprints.map((f) => f.path).join('|');
 
   // Hold the latest target in a ref so the stable `fitToTarget` callback (shared
   // by the map's onLoad and the fitKey effect) never reads a stale closure.
@@ -143,6 +157,47 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
           </Source>
         )}
 
+        {vector && (
+          <Source
+            id="vector-preview"
+            key={vector.tilesUrl}
+            maxzoom={vector.maxZoom}
+            tiles={[vector.tilesUrl]}
+            type="vector"
+          >
+            {/POLYGON/i.test(vector.geomType) && (
+              <Layer
+                id="vec-fill"
+                paint={{ 'fill-color': '#2463eb', 'fill-opacity': 0.16 }}
+                source-layer={vector.sourceLayer}
+                type="fill"
+              />
+            )}
+            {/(POLYGON|LINE)/i.test(vector.geomType) && (
+              <Layer
+                id="vec-line"
+                paint={{ 'line-color': '#2463eb', 'line-width': /LINE/i.test(vector.geomType) ? 1.6 : 0.8, 'line-opacity': 0.9 }}
+                source-layer={vector.sourceLayer}
+                type="line"
+              />
+            )}
+            {/POINT/i.test(vector.geomType) && (
+              <Layer
+                id="vec-circle"
+                paint={{
+                  'circle-radius': 3.4,
+                  'circle-color': '#2463eb',
+                  'circle-opacity': 0.85,
+                  'circle-stroke-color': '#fff',
+                  'circle-stroke-width': 1,
+                }}
+                source-layer={vector.sourceLayer}
+                type="circle"
+              />
+            )}
+          </Source>
+        )}
+
         <Source data={geojson} id="footprints" type="geojson">
           <Layer
             id="footprint-fill"
@@ -167,7 +222,7 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
       {/* top-left mode pill */}
       <div className="pointer-events-none absolute top-4 left-4 flex items-center gap-2 rounded-full border border-line bg-white/95 px-3 py-1.5 text-[12px] font-medium text-ink-soft shadow-[0_4px_14px_rgba(16,24,40,.08)] backdrop-blur">
         <Layers className="size-[13px] text-brand" />
-        {preview ? 'Tile preview' : 'Coverage'}
+        {preview ? 'Tile preview' : vector ? 'Vector preview' : 'Coverage'}
       </div>
 
       {/* zoom controls */}
@@ -199,8 +254,8 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
         <span className="font-mono text-[11px] text-muted tabular-nums">
           z{hover ? hover.zoom.toFixed(1) : '—'}
         </span>
-        <span className={cn('font-mono text-[11px]', preview ? 'text-brand' : 'text-muted')}>
-          {preview ? 'previewing output' : 'EPSG:3857'}
+        <span className={cn('font-mono text-[11px]', preview || vector ? 'text-brand' : 'text-muted')}>
+          {preview ? 'previewing output' : vector ? 'previewing vector' : 'EPSG:3857'}
         </span>
         <span className="flex-1" />
         <a

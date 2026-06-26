@@ -130,6 +130,81 @@ export interface MapEntry {
   modified: number;
 }
 
+/* ── PostGIS data sources ─────────────────────────────────────────────── */
+
+/** A configured PostgreSQL/PostGIS connection + its live health. */
+export interface PgConnDto {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  dbname: string;
+  user: string;
+  sslmode: string;
+  enabled: boolean;
+  bundled: boolean;
+  ok: boolean;
+  message: string;
+  table_count: number;
+}
+
+/** A served PostGIS vector source (one table). */
+export interface PgSourceDto {
+  id: string;
+  table: string;
+  conn_id: string;
+  conn_label: string;
+  geom_type: string;
+  srid: number;
+  /** `[name, pg_type]` per feature property. */
+  fields: [string, string][];
+  minzoom: number;
+  maxzoom: number;
+  bounds: [number, number, number, number];
+  tile_url: string;
+  tilejson_url: string;
+}
+
+export interface PgOverview {
+  available: boolean;
+  bundled_running: boolean;
+  connections: PgConnDto[];
+  sources: PgSourceDto[];
+}
+
+export interface PgTestResult {
+  ok: boolean;
+  message: string;
+  table_count: number;
+}
+
+/** Editable connection payload sent to `pg_save_connection` / `pg_test_connection`. */
+export interface PgConnectionInput {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  dbname: string;
+  user: string;
+  password: string;
+  sslmode: string;
+  enabled: boolean;
+  bundled: boolean;
+}
+
+export interface PgImportParams {
+  path: string;
+  conn_id?: string | null;
+  table?: string | null;
+  src_srs?: string | null;
+}
+
+export interface PgImportReport {
+  table: string;
+  source_id: string | null;
+  message: string;
+}
+
 /** Mirror of martin_tiler::GenerateOptions (the input to the engine). */
 export interface GenerateOptions {
   inputs: string[];

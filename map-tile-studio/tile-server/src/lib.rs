@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod pg;
 pub mod service;
 
 use martin_core::tiles::cog::CogSource;
@@ -22,7 +23,11 @@ use martin_core::tiles::Source;
 use martin_core::CacheZoomRange;
 use martin_tile_utils::TileCoord;
 use percent_encoding::percent_decode_str;
+use pg::{PgEmbed, PgRegistry};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+/// MIME type for raw (uncompressed) Mapbox Vector Tiles.
+const MVT_CONTENT_TYPE: &str = "application/x-protobuf";
 
 /// Read a single tile from an MBTiles file (XYZ in → MBTiles stores TMS).
 pub fn read_mbtiles_tile(src: &str, z: u32, x: u32, y: u32) -> Option<Vec<u8>> {
@@ -74,18 +79,23 @@ fn parse_tile_path(url: &str) -> Option<(String, u32, u32, u32)> {
     Some((source, z.parse().ok()?, x.parse().ok()?, y.parse().ok()?))
 }
 
-/// Resolve a request URL to tile bytes from the MBTiles or COG backing `{source}`.
+/// Resolve a request URL to `(tile bytes, content-type)` from the MBTiles, COG, or
+/// PostGIS source backing `{source}`. Files take precedence over PostGIS sources.
 fn resolve_tile(
     url: &str,
     maps_dir: &Path,
     rt: &tokio::runtime::Runtime,
     cogs: &mut HashMap<PathBuf, CogSource>,
-) -> Option<Vec<u8>> {
+    pg: Option<&PgRegistry>,
+) -> Option<(Vec<u8>, &'static str)> {
     let (source, z, x, y) = parse_tile_path(url)?;
 
     let mbtiles = maps_dir.join(format!("{source}.mbtiles"));
     if mbtiles.is_file() {
-        return read_mbtiles_tile(&mbtiles.to_string_lossy(), z, x, y).filter(|b| !b.is_empty());
+        let bytes =
+            read_mbtiles_tile(&mbtiles.to_string_lossy(), z, x, y).filter(|b| !b.is_empty())?;
+        let ct = content_type_of(&bytes);
+        return Some((bytes, ct));
     }
 
     for ext in ["tif", "tiff"] {
@@ -103,7 +113,16 @@ fn resolve_tile(
             }
         };
         let coord = TileCoord { z: u8::try_from(z).ok()?, x, y };
-        return rt.block_on(src.get_tile(coord, None)).ok().filter(|b| !b.is_empty());
+        let bytes = rt.block_on(src.get_tile(coord, None)).ok().filter(|b| !b.is_empty())?;
+        let ct = content_type_of(&bytes);
+        return Some((bytes, ct));
+    }
+
+    // PostGIS vector source (any SRID; reprojected to Web Mercator at query time).
+    if let Some(reg) = pg {
+        if reg.has_source(&source) {
+            return reg.get_tile(&source, z, x, y).map(|b| (b, MVT_CONTENT_TYPE));
+        }
     }
     None
 }
@@ -116,8 +135,8 @@ struct SourceMeta {
     bounds: [f64; 4],
 }
 
-/// List servable source names (file stems) in the maps folder, sorted.
-fn list_sources(maps_dir: &Path) -> Vec<String> {
+/// List servable source names (file stems + PostGIS source ids), sorted + deduped.
+fn list_sources(maps_dir: &Path, pg: Option<&PgRegistry>) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(maps_dir) {
         for entry in rd.flatten() {
@@ -130,6 +149,11 @@ fn list_sources(maps_dir: &Path) -> Vec<String> {
                 }
                 _ => {}
             }
+        }
+    }
+    if let Some(reg) = pg {
+        for s in reg.list_sources() {
+            out.push(s.id.clone());
         }
     }
     out.sort();
@@ -184,17 +208,65 @@ fn source_meta(maps_dir: &Path, source: &str) -> Option<SourceMeta> {
     None
 }
 
-/// TileJSON for a source (so QGIS / clients can add it by one URL).
-fn tilejson(maps_dir: &Path, source: &str, base: &str) -> Option<String> {
-    let m = source_meta(maps_dir, source)?;
-    Some(format!(
-        r#"{{"tilejson":"3.0.0","name":"{source}","scheme":"xyz","tiles":["{base}/{source}/{{z}}/{{x}}/{{y}}"],"minzoom":{},"maxzoom":{},"bounds":[{},{},{},{}]}}"#,
-        m.minzoom, m.maxzoom, m.bounds[0], m.bounds[1], m.bounds[2], m.bounds[3]
-    ))
+/// JSON-escape a string for embedding in a TileJSON document.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
-fn landing_html(maps_dir: &Path, base: &str) -> String {
-    let sources = list_sources(maps_dir);
+/// Vector TileJSON (with `vector_layers`) for a PostGIS source.
+fn vector_tilejson(src: &pg::PgSource, base: &str) -> String {
+    let id = &src.id;
+    let fields = src
+        .fields
+        .iter()
+        .map(|(name, ty)| format!(r#""{}":"{}""#, json_escape(name), json_escape(ty)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"tilejson":"3.0.0","name":"{name}","scheme":"xyz","format":"pbf","tiles":["{base}/{id}/{{z}}/{{x}}/{{y}}"],"minzoom":{min},"maxzoom":{max},"bounds":[{b0},{b1},{b2},{b3}],"vector_layers":[{{"id":"{layer}","fields":{{{fields}}},"minzoom":{min},"maxzoom":{max}}}]}}"#,
+        name = json_escape(&src.table),
+        layer = json_escape(&src.table),
+        min = src.minzoom,
+        max = src.maxzoom,
+        b0 = src.bounds[0],
+        b1 = src.bounds[1],
+        b2 = src.bounds[2],
+        b3 = src.bounds[3],
+    )
+}
+
+/// TileJSON for a source (so QGIS / clients can add it by one URL). Mirrors
+/// `resolve_tile`'s precedence (a file source wins over a same-named PostGIS one)
+/// so the description always matches the bytes served.
+fn tilejson(maps_dir: &Path, source: &str, base: &str, pg: Option<&PgRegistry>) -> Option<String> {
+    if let Some(m) = source_meta(maps_dir, source) {
+        return Some(format!(
+            r#"{{"tilejson":"3.0.0","name":"{source}","scheme":"xyz","tiles":["{base}/{source}/{{z}}/{{x}}/{{y}}"],"minzoom":{},"maxzoom":{},"bounds":[{},{},{},{}]}}"#,
+            m.minzoom, m.maxzoom, m.bounds[0], m.bounds[1], m.bounds[2], m.bounds[3]
+        ));
+    }
+    if let Some(reg) = pg {
+        if let Some(src) = reg.get_source(source) {
+            return Some(vector_tilejson(&src, base));
+        }
+    }
+    None
+}
+
+fn landing_html(maps_dir: &Path, base: &str, pg: Option<&PgRegistry>) -> String {
+    let sources = list_sources(maps_dir, pg);
     let rows = sources
         .iter()
         .map(|s| {
@@ -242,6 +314,7 @@ fn handle(
     maps_dir: &Path,
     rt: &tokio::runtime::Runtime,
     cogs: &mut HashMap<PathBuf, CogSource>,
+    pg: Option<&PgRegistry>,
 ) {
     let cors = || header("Access-Control-Allow-Origin", "*");
     let pna = || header("Access-Control-Allow-Private-Network", "true");
@@ -266,26 +339,28 @@ fn handle(
     }
     if path == "/" || path == "/index.html" {
         let base = format!("http://{}", host_of(&req));
-        return respond_str(req, 200, "text/html; charset=utf-8", landing_html(maps_dir, &base));
+        return respond_str(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            landing_html(maps_dir, &base, pg),
+        );
     }
     if let Some(source) = path.trim_start_matches('/').strip_suffix(".json") {
         if !source.is_empty() && !source.contains(['/', '\\', ':']) && !source.contains("..") {
             let base = format!("http://{}", host_of(&req));
-            if let Some(tj) = tilejson(maps_dir, source, &base) {
+            if let Some(tj) = tilejson(maps_dir, source, &base, pg) {
                 return respond_str(req, 200, "application/json", tj);
             }
         }
     }
 
-    let resp = match resolve_tile(&url, maps_dir, rt, cogs) {
-        Some(bytes) => {
-            let ct = content_type_of(&bytes);
-            Response::from_data(bytes)
-                .with_header(header("Content-Type", ct))
-                .with_header(header("Cache-Control", "no-cache"))
-                .with_header(cors())
-                .with_header(pna())
-        }
+    let resp = match resolve_tile(&url, maps_dir, rt, cogs, pg) {
+        Some((bytes, ct)) => Response::from_data(bytes)
+            .with_header(header("Content-Type", ct))
+            .with_header(header("Cache-Control", "no-cache"))
+            .with_header(cors())
+            .with_header(pna()),
         None => Response::from_data(Vec::new())
             .with_status_code(StatusCode(204))
             .with_header(cors())
@@ -296,7 +371,8 @@ fn handle(
 
 /// One worker thread: its own COG cache + current-thread runtime (the loop is
 /// sequential per thread; concurrency comes from running several of these).
-fn worker(server: &Server, maps_dir: &Path) {
+/// PostGIS work is delegated to the shared registry's own runtime.
+fn worker(server: &Server, maps_dir: &Path, pg: Option<Arc<PgRegistry>>) {
     // A bare current-thread runtime is enough: `CogSource::get_tile` does blocking
     // file I/O inside its async body and never awaits a tokio driver.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -304,7 +380,31 @@ fn worker(server: &Server, maps_dir: &Path) {
         .expect("tile-server runtime");
     let mut cogs: HashMap<PathBuf, CogSource> = HashMap::new();
     while let Ok(req) = server.recv() {
-        handle(req, maps_dir, &rt, &mut cogs);
+        handle(req, maps_dir, &rt, &mut cogs, pg.as_deref());
+    }
+}
+
+/// Build the PostGIS registry for a maps directory: it reads `connections.json`
+/// (alongside the maps folder) and manages the bundled cluster (`<exe dir>/pgsql`)
+/// when those binaries are present. Returns `None` if neither is available.
+#[must_use]
+pub fn build_pg_registry(maps_dir: &Path) -> Option<Arc<PgRegistry>> {
+    let config_path = pg::config_path_for(maps_dir);
+    let embed = {
+        let e = PgEmbed::new(pg::default_root(), pg::default_data_dir(maps_dir));
+        e.binaries_present().then_some(e)
+    };
+    // Serve PostGIS if we either manage a bundled cluster or have a config file
+    // describing external connections.
+    if embed.is_some() || config_path.is_file() {
+        // Materialise connections.json on first run (with the bundled entry) so the
+        // documented credentials file exists for the user to edit.
+        if embed.is_some() && !config_path.is_file() {
+            let _ = pg::PgConfig::default().save(&config_path);
+        }
+        Some(PgRegistry::new(config_path, maps_dir.to_path_buf(), embed))
+    } else {
+        None
     }
 }
 
@@ -318,14 +418,17 @@ fn worker_count() -> usize {
 }
 
 /// Bind `addr` and serve forever with a pool of worker threads. Used by the
-/// `tile-serviced` background service (e.g. `0.0.0.0:7765`).
+/// `tile-serviced` background service (e.g. `0.0.0.0:7765`). Serves MBTiles, COG,
+/// and (when available) PostGIS vector sources.
 pub fn serve_blocking(maps_dir: PathBuf, addr: SocketAddr) -> std::io::Result<()> {
+    let pg = build_pg_registry(&maps_dir);
     let server = Arc::new(Server::http(addr).map_err(io_err)?);
     let mut handles = Vec::new();
     for _ in 0..worker_count() {
         let server = Arc::clone(&server);
         let maps = maps_dir.clone();
-        handles.push(std::thread::spawn(move || worker(&server, &maps)));
+        let pg = pg.clone();
+        handles.push(std::thread::spawn(move || worker(&server, &maps, pg)));
     }
     for h in handles {
         let _ = h.join();
@@ -335,8 +438,13 @@ pub fn serve_blocking(maps_dir: PathBuf, addr: SocketAddr) -> std::io::Result<()
 
 /// Spawn a background **loopback** server (for the app's own in-app preview) on
 /// the first free port at or after `preferred`, falling back to an ephemeral
-/// port. Returns the bound port; worker threads run detached.
-pub fn serve_background(maps_dir: PathBuf, preferred: u16) -> std::io::Result<u16> {
+/// port. Returns the bound port plus the PostGIS registry (so the GUI can trigger
+/// refreshes / read connection status); worker threads run detached.
+pub fn serve_background(
+    maps_dir: PathBuf,
+    preferred: u16,
+    pg: Option<Arc<PgRegistry>>,
+) -> std::io::Result<u16> {
     let mut bound = None;
     for p in preferred..preferred.saturating_add(30) {
         if let Ok(s) = Server::http(("127.0.0.1", p)) {
@@ -356,7 +464,8 @@ pub fn serve_background(maps_dir: PathBuf, preferred: u16) -> std::io::Result<u1
     for _ in 0..worker_count() {
         let server = Arc::clone(&server);
         let maps = maps_dir.clone();
-        std::thread::spawn(move || worker(&server, &maps));
+        let pg = pg.clone();
+        std::thread::spawn(move || worker(&server, &maps, pg));
     }
     Ok(port)
 }

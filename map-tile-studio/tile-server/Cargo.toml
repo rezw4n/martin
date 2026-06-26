@@ -19,10 +19,15 @@ tiny_http = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 percent-encoding = "2"
 num_cpus = "1"
-tokio = { version = "1", features = ["rt"] }
-# COG tile reading (no Postgres/HTTP/pmtiles stack).
-martin-core = { path = "../../martin-core", default-features = false, features = ["unstable-cog"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# COG tile reading + PostGIS vector-tile serving (reuses martin-core's
+# rustls-based Postgres pool + MVT source; no OpenSSL, builds clean on Windows).
+martin-core = { path = "../../martin-core", default-features = false, features = ["unstable-cog", "postgres"] }
 martin-tile-utils = { path = "../../martin-tile-utils" }
+# Row/param types for direct ST_AsMVT queries (unifies with martin-core's copy).
+tokio-postgres = "0.7"
 
 # Windows Service integration (install/run/stop as a native service).
 [target.'cfg(windows)'.dependencies]

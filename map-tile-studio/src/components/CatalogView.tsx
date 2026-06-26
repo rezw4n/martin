@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Database,
   FolderOpen,
   ImageOff,
   Layers,
@@ -26,8 +27,11 @@ import {
 } from '@/lib/api';
 import type { BBox, MapEntry } from '@/lib/types';
 import { cn, formatBytes } from '@/lib/utils';
+import { DataCatalog } from '@/components/DataCatalog';
 import { MapCanvas } from '@/components/MapCanvas';
-import { Badge, Button } from '@/components/ui';
+import { Badge, Button, Segmented } from '@/components/ui';
+
+type CatalogTab = 'maps' | 'data';
 
 /** Build a MapCanvas tile-preview from a catalog entry. Both MBTiles and a
  *  web-mercator COG are served as XYZ tiles by the local server; we just need a
@@ -103,6 +107,7 @@ export function CatalogView({
   tileBase: string;
   gdalReady?: boolean;
 }) {
+  const [tab, setTab] = useState<CatalogTab>('maps');
   const [maps, setMaps] = useState<MapEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -182,39 +187,60 @@ export function CatalogView({
         <div>
           <div className="font-semibold text-[18px] tracking-[-0.02em] text-ink">Tiles Catalog</div>
           <div className="mt-0.5 text-[12px] text-muted">
-            {maps.length} tile map{maps.length === 1 ? '' : 's'} · {formatBytes(totalSize)}
+            {tab === 'maps'
+              ? `${maps.length} tile map${maps.length === 1 ? '' : 's'} · ${formatBytes(totalSize)}`
+              : 'PostGIS vector data sources'}
           </div>
         </div>
+        <Segmented
+          className="ml-1 w-[230px]"
+          onChange={setTab}
+          options={[
+            { value: 'maps', label: (<><Layers className="size-3.5" /> Tile Maps</>) },
+            { value: 'data', label: (<><Database className="size-3.5" /> Database</>) },
+          ]}
+          value={tab}
+        />
         <div className="flex-1" />
-        <div className="relative">
-          <Search className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-3 size-3.5 text-faint" />
-          <input
-            className="h-9 w-64 rounded-[9px] border border-[#dfe3e9] bg-white pr-3 pl-9 text-[12.5px] text-ink outline-none placeholder:text-faint focus:border-brand focus:ring-2 focus:ring-brand/15"
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(0);
-            }}
-            placeholder="Search tile maps…"
-            value={search}
-          />
-        </div>
-        <select
-          className="h-9 rounded-[9px] border border-[#dfe3e9] bg-white px-3 text-[12.5px] text-ink-soft outline-none focus:border-brand"
-          onChange={(e) => setSort(e.target.value as Sort)}
-          value={sort}
-        >
-          <option value="recent">Recent</option>
-          <option value="name">Name</option>
-          <option value="size">Size</option>
-        </select>
-        <Button onClick={load} size="sm" variant="ghost">
-          <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
-        </Button>
-        <Button busy={busy} onClick={onImport} size="sm" variant="primary">
-          <Upload className="size-4" /> Import tile map
-        </Button>
+        {tab === 'maps' && (
+          <>
+            <div className="relative">
+              <Search className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-3 size-3.5 text-faint" />
+              <input
+                className="h-9 w-64 rounded-[9px] border border-[#dfe3e9] bg-white pr-3 pl-9 text-[12.5px] text-ink outline-none placeholder:text-faint focus:border-brand focus:ring-2 focus:ring-brand/15"
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(0);
+                }}
+                placeholder="Search tile maps…"
+                value={search}
+              />
+            </div>
+            <select
+              className="h-9 rounded-[9px] border border-[#dfe3e9] bg-white px-3 text-[12.5px] text-ink-soft outline-none focus:border-brand"
+              onChange={(e) => setSort(e.target.value as Sort)}
+              value={sort}
+            >
+              <option value="recent">Recent</option>
+              <option value="name">Name</option>
+              <option value="size">Size</option>
+            </select>
+            <Button onClick={load} size="sm" variant="ghost">
+              <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
+            </Button>
+            <Button busy={busy} onClick={onImport} size="sm" variant="primary">
+              <Upload className="size-4" /> Import tile map
+            </Button>
+          </>
+        )}
       </div>
 
+      {tab === 'data' ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-7 py-6">
+          <DataCatalog />
+        </div>
+      ) : (
+        <>
       {/* selection bar */}
       <AnimatePresence>
         {selected.size > 0 && (
@@ -298,6 +324,8 @@ export function CatalogView({
           </Button>
         </div>
       )}
+        </>
+      )}
 
       {/* bottom status bar */}
       <div className="flex flex-none items-center gap-3 border-line border-t bg-white px-7 py-2 text-[11.5px]">
@@ -310,15 +338,22 @@ export function CatalogView({
           © AiGeoLAB · ai-geolab.org
         </a>
         <span className="flex-1" />
-        <span className="font-mono text-muted">
-          {maps.length} map{maps.length === 1 ? '' : 's'} · {formatBytes(totalSize)} on disk
-        </span>
-        <span className="flex items-center gap-1.5 text-muted">
-          <span
-            className={cn('size-1.5 rounded-full', gdalReady ? 'bg-ok mts-pulse' : 'bg-[#cdd5e0]')}
-          />
-          {gdalReady === false ? 'GDAL missing' : 'GDAL ready'}
-        </span>
+        {tab === 'maps' && (
+          <>
+            <span className="font-mono text-muted">
+              {maps.length} map{maps.length === 1 ? '' : 's'} · {formatBytes(totalSize)} on disk
+            </span>
+            <span className="flex items-center gap-1.5 text-muted">
+              <span
+                className={cn(
+                  'size-1.5 rounded-full',
+                  gdalReady ? 'bg-ok mts-pulse' : 'bg-[#cdd5e0]',
+                )}
+              />
+              {gdalReady === false ? 'GDAL missing' : 'GDAL ready'}
+            </span>
+          </>
+        )}
       </div>
 
       {/* preview overlay */}
@@ -511,6 +546,8 @@ function MapCard({
       )}
       onClick={onOpen}
       onKeyDown={(e) => {
+        // Don't hijack Enter/Space when an inner control is focused.
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onOpen();

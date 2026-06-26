@@ -5,7 +5,7 @@
 //! preview. The same server is shipped standalone as `tile-serviced`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use martin_core::tiles::cog::CogSource;
@@ -15,15 +15,19 @@ use martin_tiler::{
     generate as engine_generate, inspect_many, validate as engine_validate, GdalEnv,
     GenerateOptions, GenerateReport, ProgressEvent, RasterInfo, ValidationReport,
 };
+use mts_tile_server::pg::PgRegistry;
 use serde::Serialize;
 use tauri::Emitter;
 
+mod pg_cmd;
+
 /// Shared application state: the discovered GDAL environment + the default
-/// output directory + the local tile-server base URL.
-struct AppState {
-    gdal: Mutex<Result<GdalEnv, String>>,
-    output_dir: PathBuf,
-    tile_base: String,
+/// output directory + the local tile-server base URL + the PostGIS registry.
+pub(crate) struct AppState {
+    pub(crate) gdal: Mutex<Result<GdalEnv, String>>,
+    pub(crate) output_dir: PathBuf,
+    pub(crate) tile_base: String,
+    pub(crate) pg: Option<Arc<PgRegistry>>,
 }
 
 /// Base URL of the local XYZ tile server, e.g. `http://127.0.0.1:7765`.
@@ -482,9 +486,13 @@ pub fn run() {
 
     let gdal = GdalEnv::discover().map_err(|e| e.to_string());
 
+    // PostGIS registry (manages the bundled cluster + discovers vector tables).
+    // Shared with the in-process tile server and the Tauri PostGIS commands.
+    let pg = mts_tile_server::build_pg_registry(&output_dir);
+
     // Loopback XYZ tile server for offline previews + copyable tile URLs.
     // (The standalone `tile-serviced` binary serves the same maps for production.)
-    let tile_base_url = mts_tile_server::serve_background(output_dir.clone(), 7765)
+    let tile_base_url = mts_tile_server::serve_background(output_dir.clone(), 7765, pg.clone())
         .map(|port| format!("http://127.0.0.1:{port}"))
         .unwrap_or_default();
 
@@ -495,6 +503,7 @@ pub fn run() {
             gdal: Mutex::new(gdal),
             output_dir,
             tile_base: tile_base_url,
+            pg,
         })
         .invoke_handler(tauri::generate_handler![
             gdal_status,
@@ -510,6 +519,12 @@ pub fn run() {
             service_install,
             service_uninstall,
             service_set_running,
+            pg_cmd::pg_overview,
+            pg_cmd::pg_save_connection,
+            pg_cmd::pg_delete_connection,
+            pg_cmd::pg_test_connection,
+            pg_cmd::pg_import,
+            pg_cmd::pg_drop_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Map Tile Studio");

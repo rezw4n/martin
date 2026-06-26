@@ -1,4 +1,8 @@
 node_modules/
 dist/
+target/
 src-tauri/target/
 src-tauri/gen/
+release/
+# Bundled portable PostgreSQL + PostGIS (harvested for packaging; ~400 MB).
+vendor/

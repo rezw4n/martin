@@ -7,6 +7,11 @@ import type {
   GenerateOptions,
   GenerateReport,
   MapEntry,
+  PgConnectionInput,
+  PgImportParams,
+  PgImportReport,
+  PgOverview,
+  PgTestResult,
   ProgressEvent,
   RasterInfo,
   ServiceInfo,
@@ -83,6 +88,38 @@ export async function importMaps(): Promise<number> {
   const paths = Array.isArray(sel) ? sel : [sel];
   for (const p of paths) await invoke('import_map', { path: p });
   return paths.length;
+}
+
+/* ── PostGIS data sources ─────────────────────────────────────────────── */
+/** Connections + discovered vector sources, in one call (for the catalog). */
+export const pgOverview = () => invoke<PgOverview>('pg_overview');
+/** Add or update an external connection (then the registry reconnects). */
+export const pgSaveConnection = (conn: PgConnectionInput) =>
+  invoke<void>('pg_save_connection', { conn });
+export const pgDeleteConnection = (id: string) => invoke<void>('pg_delete_connection', { id });
+/** Try a connection without saving it. */
+export const pgTestConnection = (conn: PgConnectionInput) =>
+  invoke<PgTestResult>('pg_test_connection', { conn });
+/** Import a vector file into PostGIS (reprojected to EPSG:4326). */
+export const pgImport = (params: PgImportParams) =>
+  invoke<PgImportReport>('pg_import', { params });
+/** Drop an imported table (delete a vector source). */
+export const pgDropSource = (sourceId: string) =>
+  invoke<void>('pg_drop_source', { sourceId });
+
+/** Native picker for vector files to import into PostGIS. */
+export async function pickVectorFile(): Promise<string | null> {
+  const sel = await open({
+    multiple: false,
+    directory: false,
+    title: 'Import data to PostGIS',
+    filters: [
+      { name: 'Vector data', extensions: ['shp', 'geojson', 'json', 'gpkg', 'kml', 'gml'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (!sel) return null;
+  return Array.isArray(sel) ? (sel[0] ?? null) : sel;
 }
 
 /* ── background tile service ──────────────────────────────────────────── */
