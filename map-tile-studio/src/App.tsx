@@ -43,6 +43,7 @@ import type {
 import { cn, formatBytes } from '@/lib/utils';
 import { CatalogView } from '@/components/CatalogView';
 import { MapCanvas } from '@/components/MapCanvas';
+import { ServingView } from '@/components/ServingView';
 import { Titlebar, type Tab } from '@/components/Titlebar';
 import {
   Badge,
@@ -270,8 +271,9 @@ export default function App() {
       {tab === 'catalog' && (
         <CatalogView onOpenInStudio={() => setTab('studio')} tileBase={tileBase} />
       )}
+      {tab === 'serving' && <ServingView />}
 
-      <div className={cn('min-h-0 flex-1', tab === 'catalog' ? 'hidden' : 'flex')}>
+      <div className={cn('min-h-0 flex-1', tab === 'studio' ? 'flex' : 'hidden')}>
         {/* ── docked panel ─────────────────────────────────────────────── */}
         <aside className="flex w-[400px] flex-none flex-col border-r border-line bg-white">
           <AnimatePresence initial={false} mode="wait">

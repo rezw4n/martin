@@ -1,0 +1,13 @@
+# Independent workspace for Map Tile Studio (separate from the parent Martin workspace).
+# - `src-tauri`    : the desktop GUI app (generate + preview)
+# - `tile-server`  : shared headless XYZ tile server (lib) + `tile-serviced` service binary
+[workspace]
+resolver = "2"
+members = ["src-tauri", "tile-server"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

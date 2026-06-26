@@ -104,6 +104,15 @@ export interface GdalStatus {
   output_dir: string;
 }
 
+export interface ServiceInfo {
+  /** "running" | "stopped" | "not installed" | … */
+  status: string;
+  port: number;
+  /** `http://<lan-ip>:<port>` — base for `/{source}/{z}/{x}/{y}`. */
+  lan_url: string;
+  maps_dir: string;
+}
+
 export interface MapEntry {
   source_id: string;
   path: string;

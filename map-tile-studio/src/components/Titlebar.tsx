@@ -28,7 +28,7 @@ function LayersMark({ className }: { className?: string }) {
   );
 }
 
-export type Tab = 'studio' | 'catalog';
+export type Tab = 'studio' | 'catalog' | 'serving';
 
 export function Titlebar({
   status,
@@ -43,6 +43,7 @@ export function Titlebar({
   const tabs: { id: Tab; label: string }[] = [
     { id: 'studio', label: 'Studio' },
     { id: 'catalog', label: 'Tiles Catalog' },
+    { id: 'serving', label: 'Serving' },
   ];
   return (
     <header

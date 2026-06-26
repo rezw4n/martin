@@ -1,0 +1,29 @@
+[package]
+name = "mts-tile-server"
+version = "1.0.0"
+description = "Headless XYZ tile server for Map Tile Studio (MBTiles + COG)"
+authors = ["AiGeoLAB <https://ai-geolab.org>"]
+edition = "2021"
+rust-version = "1.94"
+
+[lib]
+name = "mts_tile_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tile-serviced"
+path = "src/bin/tile-serviced.rs"
+
+[dependencies]
+tiny_http = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+percent-encoding = "2"
+num_cpus = "1"
+tokio = { version = "1", features = ["rt"] }
+# COG tile reading (no Postgres/HTTP/pmtiles stack).
+martin-core = { path = "../../martin-core", default-features = false, features = ["unstable-cog"] }
+martin-tile-utils = { path = "../../martin-tile-utils" }
+
+# Windows Service integration (install/run/stop as a native service).
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"

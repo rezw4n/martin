@@ -1,8 +1,8 @@
 //! Map Tile Studio — Tauri backend.
 //!
-//! Wraps the `martin-tiler` generation engine as Tauri commands and serves
-//! generated tiles to the in-app MapLibre preview via the `mbtile://` custom
-//! protocol (no HTTP server, fully offline).
+//! Wraps the `martin-tiler` generation engine as Tauri commands and runs an
+//! in-process XYZ tile server (`mts-tile-server`) for the in-app MapLibre
+//! preview. The same server is shipped standalone as `tile-serviced`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -11,12 +11,10 @@ use std::time::UNIX_EPOCH;
 use martin_core::tiles::cog::CogSource;
 use martin_core::tiles::Source;
 use martin_core::CacheZoomRange;
-use martin_tile_utils::TileCoord;
 use martin_tiler::{
     generate as engine_generate, inspect_many, validate as engine_validate, GdalEnv,
     GenerateOptions, GenerateReport, ProgressEvent, RasterInfo, ValidationReport,
 };
-use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -107,164 +105,6 @@ async fn generate(
 #[tauri::command]
 fn cpu_count() -> usize {
     num_cpus::get()
-}
-
-/// Read a single tile from an MBTiles file (XYZ scheme; MBTiles stores TMS).
-fn read_mbtiles_tile(src: &str, z: u32, x: u32, y: u32) -> Option<Vec<u8>> {
-    use rusqlite::{Connection, OpenFlags};
-    let conn = Connection::open_with_flags(
-        src,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    // XYZ y (top-origin) -> TMS row (bottom-origin)
-    let tms_y = (1u32 << z).checked_sub(1)?.checked_sub(y)?;
-    conn.query_row(
-        "SELECT tile_data FROM tiles WHERE zoom_level=?1 AND tile_column=?2 AND tile_row=?3",
-        rusqlite::params![z, x, tms_y],
-        |row| row.get::<_, Vec<u8>>(0),
-    )
-    .ok()
-}
-
-fn content_type_of(bytes: &[u8]) -> &'static str {
-    if bytes.len() >= 4 && &bytes[0..4] == b"\x89PNG" {
-        "image/png"
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        "image/webp"
-    } else if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
-        "image/jpeg"
-    } else {
-        "application/octet-stream"
-    }
-}
-
-/* ── Local XYZ tile server ──────────────────────────────────────────────────
- * A tiny HTTP server so generated maps render as standard XYZ raster tiles in
- * the preview (more robust than a custom URI scheme) and so the tile URL is
- * copyable into other tools (QGIS, Leaflet, …). Serves only from output_dir,
- * fully offline. URL shape: GET /{source}/{z}/{x}/{y}[.ext]
- */
-
-fn header(name: &str, value: &str) -> tiny_http::Header {
-    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
-        .expect("static header is valid")
-}
-
-/// Parse + sanitize `/{source}/{z}/{x}/{y}[.ext]` into its parts, confined to a
-/// single in-folder source name (no path traversal).
-fn parse_tile_path(url: &str) -> Option<(String, u32, u32, u32)> {
-    let path = url.split('?').next().unwrap_or("");
-    let segs: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-    let [source, z, x, y] = segs.as_slice() else {
-        return None;
-    };
-    // strip an optional file extension on the y segment (e.g. `7079.webp`)
-    let y = y.split('.').next().unwrap_or(y);
-    let source = percent_decode_str(source).decode_utf8_lossy().into_owned();
-    if source.is_empty() || source.contains(['/', '\\', ':']) || source.contains("..") {
-        return None;
-    }
-    Some((source, z.parse().ok()?, x.parse().ok()?, y.parse().ok()?))
-}
-
-/// Resolve a tile request to image bytes — from an MBTiles (TMS y-flip) or a COG
-/// (`martin-core`), whichever file backs `{source}` in `output_dir`.
-fn resolve_tile(
-    url: &str,
-    output_dir: &Path,
-    rt: &tokio::runtime::Runtime,
-    cogs: &mut std::collections::HashMap<PathBuf, CogSource>,
-) -> Option<Vec<u8>> {
-    let (source, z, x, y) = parse_tile_path(url)?;
-
-    let mbtiles = output_dir.join(format!("{source}.mbtiles"));
-    if mbtiles.is_file() {
-        return read_mbtiles_tile(&mbtiles.to_string_lossy(), z, x, y).filter(|b| !b.is_empty());
-    }
-
-    for ext in ["tif", "tiff"] {
-        let cog_path = output_dir.join(format!("{source}.{ext}"));
-        if !cog_path.is_file() {
-            continue;
-        }
-        use std::collections::hash_map::Entry;
-        let src = match cogs.entry(cog_path.clone()) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(v) => {
-                let s = CogSource::new(source.clone(), cog_path.clone(), CacheZoomRange::default())
-                    .ok()?;
-                v.insert(s)
-            }
-        };
-        let coord = TileCoord { z: u8::try_from(z).ok()?, x, y };
-        return rt.block_on(src.get_tile(coord, None)).ok().filter(|b| !b.is_empty());
-    }
-    None
-}
-
-/// Start the tile server on the first free port in a small range; returns the
-/// base URL (e.g. `http://127.0.0.1:7765`). Spawns a detached worker thread.
-fn start_tile_server(output_dir: PathBuf) -> String {
-    let (server, port) = (7765u16..7795)
-        .find_map(|p| tiny_http::Server::http(("127.0.0.1", p)).ok().map(|s| (s, p)))
-        .or_else(|| {
-            // last resort: an ephemeral port
-            tiny_http::Server::http(("127.0.0.1", 0)).ok().map(|s| {
-                let p = s.server_addr().to_ip().map_or(0, |a| a.port());
-                (s, p)
-            })
-        })
-        .expect("could not bind a local tile-server port");
-
-    std::thread::spawn(move || {
-        // A small runtime to drive `CogSource::get_tile` (async); the server loop
-        // is single-threaded, so one current-thread runtime + COG cache is enough.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tile-server runtime");
-        let mut cogs: std::collections::HashMap<PathBuf, CogSource> = std::collections::HashMap::new();
-
-        for req in server.incoming_requests() {
-            // CORS + Private-Network-Access headers so the webview (an app origin
-            // fetching a loopback address) is allowed to read the tiles.
-            let cors = || header("Access-Control-Allow-Origin", "*");
-            let pna = || header("Access-Control-Allow-Private-Network", "true");
-
-            // Answer CORS / PNA preflight.
-            if req.method() == &tiny_http::Method::Options {
-                let resp = tiny_http::Response::from_data(Vec::new())
-                    .with_status_code(tiny_http::StatusCode(204))
-                    .with_header(cors())
-                    .with_header(pna())
-                    .with_header(header("Access-Control-Allow-Methods", "GET, OPTIONS"))
-                    .with_header(header("Access-Control-Allow-Headers", "*"));
-                let _ = req.respond(resp);
-                continue;
-            }
-
-            let url = req.url().to_string();
-            let resp = match resolve_tile(&url, &output_dir, &rt, &mut cogs) {
-                Some(bytes) => {
-                    let ct = content_type_of(&bytes);
-                    tiny_http::Response::from_data(bytes)
-                        .with_header(header("Content-Type", ct))
-                        .with_header(header("Cache-Control", "no-cache"))
-                        .with_header(cors())
-                        .with_header(pna())
-                }
-                // empty/sparse/missing → 204 so MapLibre treats it as a blank tile
-                None => tiny_http::Response::from_data(Vec::new())
-                    .with_status_code(tiny_http::StatusCode(204))
-                    .with_header(cors())
-                    .with_header(pna()),
-            };
-            let _ = req.respond(resp);
-        }
-    });
-
-    format!("http://127.0.0.1:{port}")
 }
 
 /* ── Tiles catalog ──────────────────────────────────────────────────────── */
@@ -473,6 +313,136 @@ fn import_map(state: tauri::State<'_, AppState>, path: String) -> Result<String,
     Ok(dest.display().to_string())
 }
 
+/* ── Background tile service (publish over LAN) ─────────────────────────────
+ * The desktop app serves a loopback preview; for production the same maps are
+ * served by the standalone `tile-serviced` binary installed as an OS service.
+ * Status is queried in-process; install/uninstall/start/stop need admin so they
+ * shell out to `tile-serviced` with UAC elevation.
+ */
+
+#[derive(Serialize)]
+struct ServiceInfo {
+    /// "running" | "stopped" | "not installed" | …
+    status: String,
+    port: u16,
+    /// `http://<lan-ip>:<port>` — paste-able base for `/{source}/{z}/{x}/{y}`.
+    lan_url: String,
+    maps_dir: String,
+}
+
+/// Best-effort primary LAN IPv4 (no packets sent — just resolves the route).
+fn lan_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+/// Path to the `tile-serviced` binary (shipped next to the app exe; same dir in dev).
+fn tile_serviced_path() -> PathBuf {
+    let name = if cfg!(windows) { "tile-serviced.exe" } else { "tile-serviced" };
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(name)))
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Persisted service port (so the UI shows the right URL across restarts).
+fn service_port_file(state: &AppState) -> PathBuf {
+    state.output_dir.join("..").join("service-port")
+}
+fn read_service_port(state: &AppState) -> u16 {
+    std::fs::read_to_string(service_port_file(state))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(7765)
+}
+
+#[tauri::command]
+fn service_status(state: tauri::State<'_, AppState>) -> ServiceInfo {
+    let port = read_service_port(&state);
+    ServiceInfo {
+        status: mts_tile_server::service::status(),
+        port,
+        lan_url: format!("http://{}:{port}", lan_ip()),
+        maps_dir: state.output_dir.display().to_string(),
+    }
+}
+
+/// Run `tile-serviced <args…>` elevated (UAC on Windows / pkexec on Linux), waiting
+/// for it to finish. Returns an error if elevation was declined or the call failed.
+fn run_serviced_elevated(args: &[String]) -> Result<(), String> {
+    let exe = tile_serviced_path();
+    if !exe.exists() {
+        return Err(format!("tile-serviced not found at {}", exe.display()));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let esc = |s: &str| s.replace('\'', "''");
+        let arglist = args
+            .iter()
+            .map(|a| format!("'{}'", esc(a)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let ps = format!(
+            "$ErrorActionPreference='Stop'; $p = Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+            esc(&exe.display().to_string()),
+            arglist
+        );
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("the elevated command failed (UAC declined, or the service operation errored)".into())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let status = std::process::Command::new("pkexec")
+            .arg(&exe)
+            .args(args)
+            .status()
+            .map_err(|e| format!("pkexec not available: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("the elevated command failed".into())
+        }
+    }
+}
+
+#[tauri::command]
+async fn service_install(state: tauri::State<'_, AppState>, port: u16) -> Result<(), String> {
+    let maps = state.output_dir.display().to_string();
+    let _ = std::fs::write(service_port_file(&state), port.to_string());
+    run_serviced_elevated(&[
+        "install".to_string(),
+        "--maps".to_string(),
+        maps,
+        "--bind".to_string(),
+        format!("0.0.0.0:{port}"),
+    ])
+}
+
+#[tauri::command]
+async fn service_uninstall() -> Result<(), String> {
+    run_serviced_elevated(&["uninstall".to_string()])
+}
+
+#[tauri::command]
+async fn service_set_running(start: bool) -> Result<(), String> {
+    run_serviced_elevated(&[if start { "start" } else { "stop" }.to_string()])
+}
+
 /// Point the engine at a portable GDAL bundled next to the exe (`./gdal`, `./python`),
 /// so the app is self-contained — the client just unzips and runs the exe.
 fn setup_bundled_gdal() {
@@ -507,8 +477,11 @@ pub fn run() {
 
     let gdal = GdalEnv::discover().map_err(|e| e.to_string());
 
-    // Local XYZ tile server for offline previews + copyable tile URLs.
-    let tile_base_url = start_tile_server(output_dir.clone());
+    // Loopback XYZ tile server for offline previews + copyable tile URLs.
+    // (The standalone `tile-serviced` binary serves the same maps for production.)
+    let tile_base_url = mts_tile_server::serve_background(output_dir.clone(), 7765)
+        .map(|port| format!("http://127.0.0.1:{port}"))
+        .unwrap_or_default();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -528,6 +501,10 @@ pub fn run() {
             delete_maps,
             import_map,
             tile_base,
+            service_status,
+            service_install,
+            service_uninstall,
+            service_set_running,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Map Tile Studio");

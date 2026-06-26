@@ -9,6 +9,7 @@ import type {
   MapEntry,
   ProgressEvent,
   RasterInfo,
+  ServiceInfo,
   ValidationReport,
 } from './types';
 
@@ -83,6 +84,13 @@ export async function importMaps(): Promise<number> {
   for (const p of paths) await invoke('import_map', { path: p });
   return paths.length;
 }
+
+/* ── background tile service ──────────────────────────────────────────── */
+export const serviceStatus = () => invoke<ServiceInfo>('service_status');
+/** Install + start the LAN tile service (triggers a UAC / admin prompt). */
+export const serviceInstall = (port: number) => invoke<void>('service_install', { port });
+export const serviceUninstall = () => invoke<void>('service_uninstall');
+export const serviceSetRunning = (start: boolean) => invoke<void>('service_set_running', { start });
 
 /** A single representative tile (the overview tile at min-zoom) as a thumbnail. */
 export function tileThumbUrl(base: string, e: MapEntry): string | null {

@@ -53,10 +53,14 @@ if (-not $Out) { $Out = Join-Path $proj 'release\MapTileStudio' }
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "    $m" -ForegroundColor DarkGray }
 
-# Make sure Node is reachable even if it isn't on this shell's PATH.
+# Make sure Node + Cargo are reachable even if not on this shell's PATH.
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     $node = 'C:\Program Files\nodejs'
     if (Test-Path (Join-Path $node 'node.exe')) { $env:Path = "$node;$env:Path" }
+}
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    $cargo = Join-Path $env:USERPROFILE '.cargo\bin'
+    if (Test-Path (Join-Path $cargo 'cargo.exe')) { $env:Path = "$cargo;$env:Path" }
 }
 
 # ── 1. sanity: OSGeo4W harvest sources ──────────────────────────────────────
@@ -88,13 +92,16 @@ if (-not $SkipBuild) {
         }
         & npm run tauri build -- --no-bundle
         if ($LASTEXITCODE) { throw 'tauri build failed' }
+        Ok 'building tile-serviced (headless LAN tile service)…'
+        & cargo build --release -p mts-tile-server
+        if ($LASTEXITCODE) { throw 'tile-serviced build failed' }
     } finally { Pop-Location }
 } else {
     Step 'Skipping build (reusing existing release binary)'
 }
 
-# locate the produced exe (Tauri names it from productName, fall back to crate name)
-$relDir = Join-Path $tauri 'target\release'
+# locate the produced exes (workspace target dir; Tauri names the app from productName)
+$relDir = Join-Path $proj 'target\release'
 $exe = @(
     (Join-Path $relDir 'Map Tile Studio.exe'),
     (Join-Path $relDir 'map-tile-studio.exe')
@@ -114,6 +121,15 @@ New-Item -ItemType Directory -Path $Out -Force | Out-Null
 
 $bundleExe = Join-Path $Out 'Map Tile Studio.exe'
 Copy-Item $exe $bundleExe -Force
+
+# Headless tile service (the GUI installs/controls it from the Serving tab).
+$serviced = Join-Path $relDir 'tile-serviced.exe'
+if (Test-Path $serviced) {
+    Copy-Item $serviced (Join-Path $Out 'tile-serviced.exe') -Force
+    Ok 'included tile-serviced.exe (LAN service)'
+} else {
+    Write-Warning "tile-serviced.exe not found at $serviced — the Serving tab won't work"
+}
 
 # Robocopy is dramatically faster than Copy-Item for the big trees.
 function Mirror($from, $to) {
@@ -140,19 +156,126 @@ Get-ChildItem $Out -Recurse -File -Include *.pyc, *.pdb -ErrorAction SilentlyCon
     Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ── 5. README + smoke test ──────────────────────────────────────────────────
-@"
-Map Tile Studio — by AiGeoLAB (https://ai-geolab.org)
+$readmeText = @'
+====================================================================
+ Map Tile Studio   -   by AiGeoLAB   -   https://ai-geolab.org
+====================================================================
 
-HOW TO RUN
-  1. Keep every file in this folder together (don't move the .exe out on its own).
-  2. Double-click "Map Tile Studio.exe".
+Turn GeoTIFF imagery into web map tiles (MBTiles tile pyramids or a single
+Cloud-Optimized GeoTIFF) and serve them over your network.
 
-That's it — GDAL and Python travel inside this folder, so nothing needs to be
-installed. Windows 11 already includes the WebView2 runtime the app uses; on an
-older Windows, install it once from https://go.microsoft.com/fwlink/p/?LinkId=2124703
 
-Generated tile maps are saved under:  %LOCALAPPDATA%\MapTileStudio\maps
-"@ | Set-Content -Path (Join-Path $Out 'README.txt') -Encoding UTF8
+1. INSTALL / RUN
+----------------
+  * Keep every file in this folder together. Do NOT move "Map Tile Studio.exe"
+    out on its own - it needs the gdal\ and python\ folders and tile-serviced.exe
+    sitting next to it.
+  * Double-click  "Map Tile Studio.exe".
+
+  Nothing to install: GDAL and Python travel inside this folder. Windows 11
+  already includes the WebView2 runtime the app uses. On older Windows, install
+  it once (free):  https://go.microsoft.com/fwlink/p/?LinkId=2124703
+
+  To put it on another PC: copy the WHOLE folder (or send the .zip and unzip it).
+
+
+2. MAKE A TILE MAP   (Studio tab)
+---------------------------------
+  1) Source imagery - click "Add GeoTIFFs" or drag .tif/.tiff onto the window.
+     The map zooms to each image as you add it.
+  2) Output type:
+       - Tile map   : a sparse MBTiles z/x/y pyramid (empty areas are skipped).
+       - Single COG : one Cloud-Optimized GeoTIFF at the imagery's resolution.
+  3) Settings:
+       - Map name   : becomes the file name AND the URL "source" name (sec. 4).
+       - Coordinate system (Tile map): Web Mercator (EPSG:3857) or WGS84.
+       - Tile format: PNG (lossless) or WEBP (smaller).
+       - Resampling : bilinear / cubic / lanczos / average / nearest.
+       - Zoom range (Tile map): leave blank for auto (max = native resolution,
+         min = 8 levels below).
+  4) Click "Generate tile map". You then get a live preview and a copyable URL.
+
+  Output files are saved here:
+       %LOCALAPPDATA%\MapTileStudio\maps
+  e.g.  C:\Users\<you>\AppData\Local\MapTileStudio\maps
+
+
+3. TILES CATALOG   (Catalog tab)
+--------------------------------
+  Lists every map you have made (12 per page). Search, sort, and click a card to
+  preview it on the map. Each card has copy-URL, reveal-in-Explorer and delete.
+  "Import tile map" copies an existing .mbtiles / .tif into the catalog.
+
+
+4. PUBLISH OVER YOUR NETWORK   (Serving tab)   <- keeps serving 24/7
+-------------------------------------------------------------------
+  The in-app preview server only runs while the app is open. To serve tiles to
+  OTHER machines, and keep serving after you close the app and after the PC
+  restarts, install the background service:
+
+      Serving tab  ->  set Port (default 7765)  ->  "Install & start service"
+      ->  approve the Windows admin (UAC) prompt.
+
+  This installs tile-serviced.exe as a Windows Service (starts automatically on
+  boot) and opens the firewall port for you. The tab shows the address to share.
+
+  URLS  (replace <ip> with this PC's LAN address shown in the Serving tab;
+         replace <source> with a map name from the Catalog):
+
+      XYZ tiles      http://<ip>:7765/<source>/{z}/{x}/{y}
+      Map list page  http://<ip>:7765/
+      TileJSON       http://<ip>:7765/<source>.json
+      Health check   http://<ip>:7765/health
+
+  USE THE TILES:
+    - QGIS    : Browser panel -> XYZ Tiles -> New Connection -> paste the XYZ URL
+                (or add the TileJSON URL). Set min/max zoom if asked.
+    - Leaflet : L.tileLayer("http://<ip>:7765/<source>/{z}/{x}/{y}").addTo(map)
+    - MapLibre / OpenLayers : add a raster XYZ source with the same URL.
+    - Browser : open  http://<ip>:7765/  to see the list and links.
+
+  CONTROL: the Serving tab has Start / Stop / Uninstall. Uninstall also removes
+  the firewall rule. Status refreshes automatically.
+
+  INTERNET (not just LAN): put a reverse proxy (Caddy / nginx / IIS) with HTTPS
+  in front of port 7765 - do not expose the port directly to the internet.
+
+
+5. ADVANCED - run the service from a command line
+-------------------------------------------------
+  tile-serviced.exe also works standalone (Command Prompt / PowerShell):
+
+      tile-serviced run       [--maps <folder>] [--bind <addr:port>]   foreground
+      tile-serviced install   [--maps <folder>] [--bind <addr:port>]   (as Admin)
+      tile-serviced uninstall                                          (as Admin)
+      tile-serviced start | stop                                       (as Admin)
+      tile-serviced status
+
+  Defaults: --maps = %LOCALAPPDATA%\MapTileStudio\maps , --bind = 0.0.0.0:7765
+
+  LINUX: the same binary installs a systemd unit
+  (/etc/systemd/system/maptilestudio-tiles.service). Run "tile-serviced install"
+  with sudo and pass your maps folder with --maps.
+
+
+6. TROUBLESHOOTING
+------------------
+  - "GDAL not found" / engine errors: the folder is incomplete - re-unzip so the
+    gdal\ and python\ folders sit next to the .exe.
+  - Service will not install: approve the admin (UAC) prompt, or run
+    "tile-serviced install" from an Administrator command prompt.
+  - Another PC cannot reach the tiles: check that the service shows "running",
+    both PCs are on the same network, you used THIS PC's LAN IP (Serving tab),
+    and the firewall allowed it (re-run Install to re-add the rule).
+  - Port already in use: change the Port in the Serving tab before installing.
+  - Blank patches on the map: normal for sparse maps - empty areas have no tiles.
+
+
+--------------------------------------------------------------------
+ Map Tile Studio   -   by AiGeoLAB   -   https://ai-geolab.org
+--------------------------------------------------------------------
+'@
+$readmeText | Set-Content -Path (Join-Path $Out 'README.txt') -Encoding UTF8
 
 Step 'Verifying bundle contents + GDAL/PROJ runtime'
 # The data trees are only used at tiling time, so assert they actually landed in

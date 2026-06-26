@@ -6,9 +6,6 @@ authors = ["AiGeoLAB <https://ai-geolab.org>"]
 edition = "2021"
 rust-version = "1.94"
 
-# Independent workspace so this app does not join the parent Martin workspace.
-[workspace]
-
 [lib]
 name = "map_tile_studio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -24,21 +21,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-percent-encoding = "2"
 num_cpus = "1"
-# Tiny local HTTP tile server so generated maps preview as standard XYZ tiles
-# (and the URL is copyable into QGIS/Leaflet/etc.).
-tiny_http = "0.12"
 
+# Shared headless XYZ tile server (in-app preview + the standalone service).
+mts-tile-server = { path = "../tile-server" }
 # The generation engine — reused directly, no HTTP server.
 martin-tiler = { path = "../../martin-tiler", default-features = false }
-# COG tile reading for the local preview server (no Postgres/HTTP/pmtiles stack).
+# COG metadata for the catalog (zoom range / bounds / format).
 martin-core = { path = "../../martin-core", default-features = false, features = ["unstable-cog"] }
 martin-tile-utils = { path = "../../martin-tile-utils" }
-
-[profile.release]
-opt-level = "s"
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
