@@ -100,12 +100,15 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
     );
   }, []);
 
-  // Re-fit when the target changes on an already-loaded map (e.g. the Studio
-  // map switching to a fresh preview). Initial fit is driven by `onLoad` below,
-  // which — unlike a ref read on mount — can't miss the map-ready moment.
+  // Re-fit when the target changes (e.g. a GeoTIFF added in Studio, or switching
+  // preview). Only requires the map to exist — `fitBounds` is a camera move that
+  // works even while tiles are still loading, so we must NOT gate on `loaded()`
+  // (it returns false mid tile-load and would silently skip the fit). The very
+  // first fit on a fresh mount is driven by `onLoad` below, since the map ref may
+  // not be set yet when this effect first runs.
   useEffect(() => {
     const map = mapRef.current?.getMap();
-    if (map?.loaded()) fitToTarget();
+    if (map) fitToTarget();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitKey]);
 

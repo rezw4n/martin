@@ -19,8 +19,8 @@ use crate::error::{TilerError, TilerResult};
 use crate::gdal::{GdalEnv, parse_progress_percent};
 use crate::inspect::{inspect_many, inspect_one};
 use crate::model::{
-    BBox, CogOutput, GenerateOptions, GenerateReport, GridOutput, GridParams, ProgressEvent,
-    RasterInfo, Resampling, TileFormat, TileGrid, ZoomTally,
+    BBox, CogOutput, EARTH_CIRCUMFERENCE, GenerateOptions, GenerateReport, GridOutput, GridParams,
+    ProgressEvent, RasterInfo, Resampling, TileFormat, TileGrid, ZoomTally,
 };
 
 /// Run a full generation. `on_progress` receives streamed [`ProgressEvent`]s.
@@ -200,8 +200,23 @@ pub async fn generate(
         let source_id = format!("{}-cog", sanitize(&opts.name));
         let cog_path = opts.output_dir.join(format!("{source_id}.tif"));
         let _ = std::fs::remove_file(&cog_path);
-        let aligned_levels = cog_aligned_levels(&combined_wgs84, native_zoom);
-        build_cog(gdal, &mosaic_vrt, &cog_path, opts, aligned_levels, &mut on_progress).await?;
+        // Fast path: a single input that is ALREADY a grid-aligned Web Mercator COG
+        // is servable as-is — copy it rather than re-tiling/re-compressing. The
+        // alignment check is strict so we never pass through a COG that would shift
+        // when served tile-by-tile.
+        if opts.inputs.len() == 1
+            && infos.first().is_some_and(|i| i.epsg == Some(3857) && i.is_tiled && i.has_overviews)
+            && is_aligned_webmerc_cog(gdal, &opts.inputs[0]).await
+        {
+            std::fs::copy(&opts.inputs[0], &cog_path)?;
+            log(
+                &mut on_progress,
+                "[cog] input is already a tile-aligned Web Mercator COG — served as-is, no reprocessing".to_string(),
+            );
+        } else {
+            let aligned_levels = cog_aligned_levels(&combined_wgs84, native_zoom);
+            build_cog(gdal, &mosaic_vrt, &cog_path, opts, aligned_levels, &mut on_progress).await?;
+        }
         let info = inspect_one(gdal, &cog_path).await.ok();
         // Fit/report the *data* bounds, not the COG's grid-aligned (slightly padded) extent.
         let bounds = combined_wgs84;
@@ -394,10 +409,11 @@ async fn build_cog(
 /// plus one for safety. Keeping it matched to the data avoids padding the COG's
 /// extent (which would otherwise inflate the served bounds for a small image).
 fn cog_aligned_levels(bounds: &BBox, native_zoom: Option<u8>) -> u32 {
+    use std::f64::consts::PI;
     let world_tiles = 2f64.powi(i32::from(native_zoom.unwrap_or(18)));
     let merc_y = |lat: f64| {
-        let r: f64 = lat.to_radians();
-        (1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0
+        let r = lat.to_radians();
+        (1.0 - (r.tan() + 1.0 / r.cos()).ln() / PI) / 2.0
     };
     let span_x = (bounds.max_x - bounds.min_x).abs() / 360.0;
     let span_y = (merc_y(bounds.min_y) - merc_y(bounds.max_y)).abs();
@@ -410,6 +426,83 @@ fn cog_aligned_levels(bounds: &BBox, native_zoom: Option<u8>) -> u32 {
         levels += 1;
     }
     levels
+}
+
+/// Whether `path` is already a Web Mercator COG whose full-resolution tiles AND
+/// every overview line up with the XYZ tile grid — i.e. servable as-is, one
+/// stored tile per XYZ tile (which is what `martin-core` assumes). Deliberately
+/// strict: a COG that is even slightly off-grid would shift when served, so any
+/// doubt returns `false` and the caller reprocesses it into a known-good COG.
+async fn is_aligned_webmerc_cog(gdal: &GdalEnv, path: &Path) -> bool {
+    let tool = gdal.tool("gdalinfo");
+    let args = vec!["-json".to_string(), path.to_string_lossy().into_owned()];
+    let Ok(stdout) = gdal.run_capture(&tool, &args).await else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) else {
+        return false;
+    };
+
+    // Only pass through compressions martin-core can serve (else it would 204).
+    let compression = json
+        .get("metadata")
+        .and_then(|m| m.get("IMAGE_STRUCTURE"))
+        .and_then(|s| s.get("COMPRESSION"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("NONE");
+    if !matches!(compression, "NONE" | "DEFLATE" | "LZW" | "JPEG" | "YCbCr JPEG" | "WEBP") {
+        return false;
+    }
+
+    // geoTransform = [originX, resX, 0, originY, 0, -resY]; must be axis-aligned.
+    let Some(gt) = json.get("geoTransform").and_then(serde_json::Value::as_array).filter(|a| a.len() == 6)
+    else {
+        return false;
+    };
+    let (Some(origin_x), Some(res), Some(origin_y)) =
+        (gt[0].as_f64(), gt[1].as_f64(), gt[3].as_f64())
+    else {
+        return false;
+    };
+    let north_up = gt[2].as_f64().is_some_and(|v| v.abs() < 1e-9)
+        && gt[4].as_f64().is_some_and(|v| v.abs() < 1e-9);
+    if !north_up || res <= 0.0 {
+        return false;
+    }
+
+    // 256px internal tiling + at least one overview.
+    let Some(band0) = json.get("bands").and_then(serde_json::Value::as_array).and_then(|b| b.first())
+    else {
+        return false;
+    };
+    let tile = band0
+        .get("block")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|b| b.first())
+        .and_then(serde_json::Value::as_u64);
+    if tile != Some(256) {
+        return false;
+    }
+    let n_ovr = band0.get("overviews").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+    if n_ovr == 0 {
+        return false;
+    }
+
+    // Base resolution must match a standard web-mercator zoom, and the origin tile
+    // index must be divisible by 2^n_overviews so that EVERY overview aligns too.
+    let tile_m = res * 256.0;
+    let z = (EARTH_CIRCUMFERENCE / tile_m).log2();
+    if (z - z.round()).abs() > 1e-3 {
+        return false;
+    }
+    let half = EARTH_CIRCUMFERENCE / 2.0;
+    let pow = 2f64.powi(i32::try_from(n_ovr).unwrap_or(0));
+    // The base tile index divided by 2^n_overviews must be (near) a whole number.
+    let aligned = |v: f64| {
+        let q = v / pow;
+        (q - q.round()).abs() < 1e-6
+    };
+    aligned((origin_x + half) / tile_m) && aligned((half - origin_y) / tile_m)
 }
 
 /// Emit a log line, and a percent event when one can be parsed.

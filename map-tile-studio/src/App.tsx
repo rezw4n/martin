@@ -591,8 +591,8 @@ function OutputSection(props: {
           >
             <div className="flex items-start gap-2 rounded-[11px] border border-brand/20 bg-brand-tint/40 px-3 py-2.5 text-[11.5px] leading-snug text-ink-soft">
               <Info className="mt-px size-3.5 flex-none text-brand" />
-              A single overview-pyramided GeoTIFF in Web Mercator — zoom levels are derived
-              automatically. No tile-grid choice needed.
+              A single overview-pyramided GeoTIFF in Web Mercator (always EPSG:3857), at the
+              imagery's native resolution. Zoom levels are derived automatically.
             </div>
           </motion.div>
         ) : (
