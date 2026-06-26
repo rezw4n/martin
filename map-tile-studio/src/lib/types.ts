@@ -104,6 +104,21 @@ export interface GdalStatus {
   output_dir: string;
 }
 
+export interface MapEntry {
+  source_id: string;
+  path: string;
+  kind: 'mbtiles' | 'cog';
+  name: string;
+  format: string;
+  crs: string | null;
+  min_zoom: number | null;
+  max_zoom: number | null;
+  tiles_total: number | null;
+  bounds: [number, number, number, number] | null;
+  size: number;
+  modified: number;
+}
+
 /** Mirror of martin_tiler::GenerateOptions (the input to the engine). */
 export interface GenerateOptions {
   inputs: string[];

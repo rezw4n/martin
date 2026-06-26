@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' http://mbtile.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://mbtile.localhost ipc: http://ipc.localhost https:; worker-src 'self' blob:; font-src 'self' data:"
+      "csp": "default-src 'self'; img-src 'self' http://127.0.0.1:* http://localhost:* data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* ipc: http://ipc.localhost https:; worker-src 'self' blob:; font-src 'self' data:"
     }
   },
   "bundle": {

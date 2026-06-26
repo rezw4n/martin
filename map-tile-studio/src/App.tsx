@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Copy,
   FolderOpen,
+  Grid3x3,
   Image as ImageIcon,
   Info,
   Layers,
@@ -20,6 +21,7 @@ import {
 import {
   gdalStatus,
   generate,
+  getTileBase,
   inspect,
   pickGeoTiffs,
   revealInExplorer,
@@ -39,8 +41,9 @@ import type {
   ValidationReport,
 } from '@/lib/types';
 import { cn, formatBytes } from '@/lib/utils';
+import { CatalogView } from '@/components/CatalogView';
 import { MapCanvas } from '@/components/MapCanvas';
-import { Titlebar } from '@/components/Titlebar';
+import { Titlebar, type Tab } from '@/components/Titlebar';
 import {
   Badge,
   Button,
@@ -49,11 +52,11 @@ import {
   Segmented,
   Stat,
   TextInput,
-  Toggle,
 } from '@/components/ui';
 
 type Phase = 'idle' | 'generating' | 'done';
 type PrimaryGrid = 'web-mercator' | 'geodetic';
+type OutputType = 'mbtiles' | 'cog';
 
 interface ProgressState {
   stage: string;
@@ -70,7 +73,9 @@ function gridLabel(g: TileGrid): string {
 }
 
 export default function App() {
+  const [tab, setTab] = useState<Tab>('studio');
   const [gdal, setGdal] = useState<GdalStatus | null>(null);
+  const [tileBase, setTileBase] = useState('');
   const [files, setFiles] = useState<RasterInfo[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [inspecting, setInspecting] = useState(false);
@@ -86,7 +91,7 @@ export default function App() {
   const [resampling, setResampling] = useState<ResamplingId>('bilinear');
   const [minZoom, setMinZoom] = useState('');
   const [maxZoom, setMaxZoom] = useState('');
-  const [cog, setCog] = useState(false);
+  const [outputType, setOutputType] = useState<OutputType>('mbtiles');
 
   // run state
   const [phase, setPhase] = useState<Phase>('idle');
@@ -97,6 +102,7 @@ export default function App() {
 
   useEffect(() => {
     gdalStatus().then(setGdal).catch((e) => setError(String(e)));
+    getTileBase().then(setTileBase).catch(() => {});
   }, []);
 
   const addPaths = useCallback(
@@ -163,19 +169,22 @@ export default function App() {
 
   const startGenerate = async () => {
     if (!gdal || !canGenerate) return;
-    const grids: TileGrid[] = [grid];
-    if (customOn && customEpsg) grids.push({ custom: Number(customEpsg) });
+    const isCog = outputType === 'cog';
+    // COG mode → no tile-pyramid grids, single COG file. Otherwise the chosen
+    // grid (plus an optional custom projected grid) and no COG.
+    const grids: TileGrid[] = isCog ? [] : [grid];
+    if (!isCog && customOn && customEpsg) grids.push({ custom: Number(customEpsg) });
 
     const opts: GenerateOptions = {
       inputs: selectedFiles.map((f) => f.path),
       output_dir: gdal.output_dir,
       name: name.trim(),
       grids,
-      min_zoom: minZoom ? Number(minZoom) : null,
-      max_zoom: maxZoom ? Number(maxZoom) : null,
+      min_zoom: isCog || !minZoom ? null : Number(minZoom),
+      max_zoom: isCog || !maxZoom ? null : Number(maxZoom),
       format,
       resampling,
-      cog,
+      cog: isCog,
       keep_intermediate: false,
     };
 
@@ -207,7 +216,7 @@ export default function App() {
         rep.outputs[0];
       if (previewOut) {
         setPreview({
-          url: tileUrlTemplate(previewOut.mbtiles_path),
+          url: tileUrlTemplate(tileBase, previewOut.source_id),
           bounds: previewOut.bounds_wgs84,
           maxZoom: previewOut.max_zoom,
         });
@@ -248,9 +257,13 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col bg-white text-ink">
-      <Titlebar status={statusPill} />
+      <Titlebar onTab={setTab} status={statusPill} tab={tab} />
 
-      <div className="flex min-h-0 flex-1">
+      {tab === 'catalog' && (
+        <CatalogView onOpenInStudio={() => setTab('studio')} tileBase={tileBase} />
+      )}
+
+      <div className={cn('min-h-0 flex-1', tab === 'catalog' ? 'hidden' : 'flex')}>
         {/* ── docked panel ─────────────────────────────────────────────── */}
         <aside className="flex w-[400px] flex-none flex-col border-r border-line bg-white">
           <AnimatePresence initial={false} mode="wait">
@@ -275,7 +288,6 @@ export default function App() {
                     selected={selected}
                   />
                   <OutputSection
-                    cog={cog}
                     customEpsg={customEpsg}
                     customOn={customOn}
                     format={format}
@@ -283,8 +295,8 @@ export default function App() {
                     maxZoom={maxZoom}
                     minZoom={minZoom}
                     name={name}
+                    outputType={outputType}
                     resampling={resampling}
-                    setCog={setCog}
                     setCustomEpsg={setCustomEpsg}
                     setCustomOn={setCustomOn}
                     setFormat={setFormat}
@@ -292,6 +304,7 @@ export default function App() {
                     setMaxZoom={setMaxZoom}
                     setMinZoom={setMinZoom}
                     setName={setName}
+                    setOutputType={setOutputType}
                     setResampling={setResampling}
                   />
                 </div>
@@ -307,7 +320,9 @@ export default function App() {
                       {selectedFiles.length} image{selectedFiles.length === 1 ? '' : 's'} ·{' '}
                       {formatBytes(totalSize)}
                     </span>
-                    <span className="font-mono">{gridLabel(grid)}</span>
+                    <span className="font-mono">
+                      {outputType === 'cog' ? 'Single COG · GeoTIFF' : gridLabel(grid)}
+                    </span>
                   </div>
                   <Button
                     className="w-full"
@@ -348,6 +363,7 @@ export default function App() {
                   onNew={reset}
                   onReveal={(p) => revealInExplorer(p)}
                   report={report}
+                  tileBase={tileBase}
                   validation={validation}
                 />
               </motion.div>
@@ -502,6 +518,8 @@ function SourceSection({
 function OutputSection(props: {
   name: string;
   setName: (v: string) => void;
+  outputType: OutputType;
+  setOutputType: (v: OutputType) => void;
   grid: PrimaryGrid;
   setGrid: (v: PrimaryGrid) => void;
   customOn: boolean;
@@ -516,15 +534,33 @@ function OutputSection(props: {
   setMinZoom: (v: string) => void;
   maxZoom: string;
   setMaxZoom: (v: string) => void;
-  cog: boolean;
-  setCog: (v: boolean) => void;
 }) {
+  const isCog = props.outputType === 'cog';
   return (
     <section className="flex flex-col gap-4">
       <div className="flex items-center gap-2.5">
         <StepDot n={2} />
         <span className="font-semibold text-[13px] text-ink">Output settings</span>
       </div>
+
+      <Field hint={isCog ? 'one GeoTIFF' : 'tile pyramid'} label="Output type">
+        <div className="grid grid-cols-2 gap-2">
+          <OutputTypeCard
+            active={!isCog}
+            desc="Sparse z/x/y tiles in an MBTiles file"
+            icon={<Grid3x3 className="size-4" />}
+            onClick={() => props.setOutputType('mbtiles')}
+            title="Tile map"
+          />
+          <OutputTypeCard
+            active={isCog}
+            desc="One Cloud-Optimized GeoTIFF"
+            icon={<Layers className="size-4" />}
+            onClick={() => props.setOutputType('cog')}
+            title="Single COG"
+          />
+        </div>
+      </Field>
 
       <Field label="Map name">
         <TextInput
@@ -535,47 +571,77 @@ function OutputSection(props: {
         />
       </Field>
 
-      <Field label="Coordinate system">
-        <Segmented
-          onChange={props.setGrid}
-          options={[
-            { value: 'web-mercator', label: 'Web Mercator' },
-            { value: 'geodetic', label: 'WGS84' },
-          ]}
-          value={props.grid}
-        />
-      </Field>
-
-      <div className="space-y-2 rounded-[11px] border border-line bg-[#fbfcfd] p-2.5">
-        <label className="flex cursor-pointer items-center gap-2.5">
-          <input
-            checked={props.customOn}
-            className="size-4 accent-[#2463eb]"
-            onChange={(e) => props.setCustomOn(e.target.checked)}
-            type="checkbox"
-          />
-          <span className="font-medium text-[12.5px] text-ink">Add a custom projected grid</span>
-        </label>
-        {props.customOn && (
-          <>
-            <div className="flex items-center gap-2 pl-6">
-              <span className="text-[12px] text-muted">EPSG:</span>
-              <TextInput
-                className="h-9 w-28"
-                mono
-                onChange={(e) => props.setCustomEpsg(e.target.value.replace(/[^0-9]/g, ''))}
-                placeholder="9680"
-                value={props.customEpsg}
-              />
+      <AnimatePresence initial={false} mode="wait">
+        {isCog ? (
+          <motion.div
+            animate={{ opacity: 1, height: 'auto' }}
+            className="overflow-hidden"
+            exit={{ opacity: 0, height: 0 }}
+            initial={{ opacity: 0, height: 0 }}
+            key="cog"
+            transition={{ duration: 0.18 }}
+          >
+            <div className="flex items-start gap-2 rounded-[11px] border border-brand/20 bg-brand-tint/40 px-3 py-2.5 text-[11.5px] leading-snug text-ink-soft">
+              <Info className="mt-px size-3.5 flex-none text-brand" />
+              A single overview-pyramided GeoTIFF in Web Mercator — zoom levels are derived
+              automatically. No tile-grid choice needed.
             </div>
-            <p className="flex items-start gap-1.5 pl-6 text-[11px] leading-snug text-[#b54708]">
-              <Info className="mt-px size-3.5 flex-none" />
-              Custom-grid tiles are not Web Mercator — display them with OpenLayers (a config is
-              provided after generation).
-            </p>
-          </>
+          </motion.div>
+        ) : (
+          <motion.div
+            animate={{ opacity: 1, height: 'auto' }}
+            className="flex flex-col gap-4 overflow-hidden"
+            exit={{ opacity: 0, height: 0 }}
+            initial={{ opacity: 0, height: 0 }}
+            key="mbtiles"
+            transition={{ duration: 0.18 }}
+          >
+            <Field label="Coordinate system">
+              <Segmented
+                onChange={props.setGrid}
+                options={[
+                  { value: 'web-mercator', label: 'Web Mercator' },
+                  { value: 'geodetic', label: 'WGS84' },
+                ]}
+                value={props.grid}
+              />
+            </Field>
+
+            <div className="space-y-2 rounded-[11px] border border-line bg-[#fbfcfd] p-2.5">
+              <label className="flex cursor-pointer items-center gap-2.5">
+                <input
+                  checked={props.customOn}
+                  className="size-4 accent-[#2463eb]"
+                  onChange={(e) => props.setCustomOn(e.target.checked)}
+                  type="checkbox"
+                />
+                <span className="font-medium text-[12.5px] text-ink">
+                  Add a custom projected grid
+                </span>
+              </label>
+              {props.customOn && (
+                <>
+                  <div className="flex items-center gap-2 pl-6">
+                    <span className="text-[12px] text-muted">EPSG:</span>
+                    <TextInput
+                      className="h-9 w-28"
+                      mono
+                      onChange={(e) => props.setCustomEpsg(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="9680"
+                      value={props.customEpsg}
+                    />
+                  </div>
+                  <p className="flex items-start gap-1.5 pl-6 text-[11px] leading-snug text-[#b54708]">
+                    <Info className="mt-px size-3.5 flex-none" />
+                    Custom-grid tiles are not Web Mercator — display them with OpenLayers (a config
+                    is provided after generation).
+                  </p>
+                </>
+              )}
+            </div>
+          </motion.div>
         )}
-      </div>
+      </AnimatePresence>
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Tile format">
@@ -616,31 +682,59 @@ function OutputSection(props: {
         </Field>
       </div>
 
-      <Field hint="blank = auto" label="Zoom range">
-        <div className="flex items-center gap-2.5">
-          <TextInput
-            mono
-            onChange={(e) => props.setMinZoom(e.target.value.replace(/[^0-9]/g, ''))}
-            placeholder="min"
-            value={props.minZoom}
-          />
-          <span className="text-faint">–</span>
-          <TextInput
-            mono
-            onChange={(e) => props.setMaxZoom(e.target.value.replace(/[^0-9]/g, ''))}
-            placeholder="max"
-            value={props.maxZoom}
-          />
-        </div>
-      </Field>
-
-      <Toggle
-        checked={props.cog}
-        description="A Cloud-Optimized GeoTIFF served at z/x/y — one file, no MBTiles."
-        onChange={props.setCog}
-        title="Also create a single COG"
-      />
+      {!isCog && (
+        <Field hint="blank = auto" label="Zoom range">
+          <div className="flex items-center gap-2.5">
+            <TextInput
+              mono
+              onChange={(e) => props.setMinZoom(e.target.value.replace(/[^0-9]/g, ''))}
+              placeholder="min"
+              value={props.minZoom}
+            />
+            <span className="text-faint">–</span>
+            <TextInput
+              mono
+              onChange={(e) => props.setMaxZoom(e.target.value.replace(/[^0-9]/g, ''))}
+              placeholder="max"
+              value={props.maxZoom}
+            />
+          </div>
+        </Field>
+      )}
     </section>
+  );
+}
+
+function OutputTypeCard({
+  active,
+  icon,
+  title,
+  desc,
+  onClick,
+}: {
+  active: boolean;
+  icon: React.ReactNode;
+  title: string;
+  desc: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      className={cn(
+        'flex flex-col gap-1.5 rounded-[11px] border p-3 text-left transition-all',
+        active
+          ? 'border-brand bg-brand-tint/50 shadow-[0_1px_2px_rgba(36,99,235,.12)]'
+          : 'border-line bg-white hover:border-[#cdd5e0] hover:bg-[#fafbfd]',
+      )}
+      onClick={onClick}
+      type="button"
+    >
+      <span className={cn('flex items-center gap-1.5', active ? 'text-brand' : 'text-muted')}>
+        {icon}
+        <span className="font-semibold text-[12.5px] text-ink">{title}</span>
+      </span>
+      <span className="text-[11px] leading-snug text-faint">{desc}</span>
+    </button>
   );
 }
 
@@ -701,11 +795,13 @@ function ResultView({
   validation,
   onNew,
   onReveal,
+  tileBase,
 }: {
   report: GenerateReport;
   validation: ValidationReport | null;
   onNew: () => void;
   onReveal: (path: string) => void;
+  tileBase: string;
 }) {
   const folder = report.outputs[0]?.mbtiles_path ?? report.cog_output?.cog_path;
   return (
@@ -727,7 +823,7 @@ function ResultView({
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-6 py-5">
         {report.outputs.map((o) => (
-          <OutputCard key={o.source_id} output={o} />
+          <OutputCard key={o.source_id} output={o} tileBase={tileBase} />
         ))}
 
         {report.cog_output && (
@@ -764,9 +860,9 @@ function ResultView({
   );
 }
 
-function OutputCard({ output: o }: { output: GridOutput }) {
+function OutputCard({ output: o, tileBase }: { output: GridOutput; tileBase: string }) {
   const sparsity = o.dense_total > 0 ? o.empty_skipped / o.dense_total : 0;
-  const url = `/${o.source_id}/{z}/{x}/{y}`;
+  const url = tileBase ? tileUrlTemplate(tileBase, o.source_id) : `/${o.source_id}/{z}/{x}/{y}`;
   return (
     <div className="rounded-[12px] border border-line bg-white p-4 shadow-[0_1px_2px_rgba(16,24,40,.04)]">
       <div className="mb-3 flex items-center justify-between">

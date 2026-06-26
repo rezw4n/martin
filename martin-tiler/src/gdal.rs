@@ -93,6 +93,24 @@ fn first_existing(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathB
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// On Windows, swap a console-subsystem `python.exe` for the GUI-subsystem
+/// `pythonw.exe` beside it (when present). `gdal2tiles` runs with `--processes N`
+/// and spawns worker interpreters through Python's `multiprocessing`; each worker
+/// copies `sys.executable`, so a console `python.exe` pops a black console window
+/// per worker (Windows creation flags are per-process and are NOT inherited from
+/// our `CREATE_NO_WINDOW` parent). `pythonw.exe` never allocates a console, and
+/// progress is still captured because stdout/stderr are redirected to pipes.
+#[cfg(windows)]
+fn prefer_windowless_python(python_exe: Option<PathBuf>) -> Option<PathBuf> {
+    let py = python_exe?;
+    let is_python_exe = py.file_name().and_then(|s| s.to_str()) == Some("python.exe");
+    let pyw = py.with_file_name("pythonw.exe");
+    if is_python_exe && pyw.exists() {
+        return Some(pyw);
+    }
+    Some(py)
+}
+
 impl GdalEnv {
     /// Discover a usable GDAL installation, or explain what was tried.
     pub fn discover() -> TilerResult<Self> {
@@ -116,7 +134,6 @@ impl GdalEnv {
             env.insert("GDAL_DATA".into(), dir.display().to_string());
         } else if let Some(dir) = first_existing([
             prefix.join("apps/gdal/share/gdal"),
-            prefix.join("share/gdal"),
             prefix.join("share/gdal"),
             bin_dir.join("../share/gdal"),
         ]) {
@@ -182,6 +199,10 @@ impl GdalEnv {
             }
         }
 
+        // On Windows, prefer the GUI-subsystem `pythonw.exe` (no console windows).
+        #[cfg(windows)]
+        let python_exe = prefer_windowless_python(python_exe);
+
         // gdal2tiles.exe/.py launcher, used only if no python interpreter was found.
         let mut g2t_candidates: Vec<PathBuf> = Vec::new();
         if cfg!(windows) {
@@ -243,6 +264,10 @@ impl GdalEnv {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        // Don't pop a console window for each GDAL subprocess (e.g. when launched
+        // from a windowed desktop app). CREATE_NO_WINDOW = 0x0800_0000.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
     }
 
     /// Run a command to completion, capturing all of stdout (used for `gdalinfo -json`).

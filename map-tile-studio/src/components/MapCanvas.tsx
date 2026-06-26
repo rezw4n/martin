@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Layer, Map as MapLibreMap, type MapRef, Source } from '@vis.gl/react-maplibre';
 import type { StyleSpecification } from 'maplibre-gl';
 import { Layers, Minus, Plus } from 'lucide-react';
@@ -79,18 +79,33 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
     ? `p:${preview.url}`
     : footprints.map((f) => f.path).join('|');
 
-  useEffect(() => {
+  // Hold the latest target in a ref so the stable `fitToTarget` callback (shared
+  // by the map's onLoad and the fitKey effect) never reads a stale closure.
+  const fitTargetRef = useRef(fitTarget);
+  fitTargetRef.current = fitTarget;
+
+  const fitToTarget = useCallback(() => {
     const map = mapRef.current?.getMap();
-    if (!map || !fitTarget) return;
-    const isWorld = fitTarget.min_x <= -179 && fitTarget.max_x >= 179;
+    const t = fitTargetRef.current;
+    if (!map || !t) return;
+    map.resize(); // the overlay container may have only just been laid out
+    const isWorld = t.min_x <= -179 && t.max_x >= 179;
     if (isWorld) return;
     map.fitBounds(
       [
-        [fitTarget.min_x, fitTarget.min_y],
-        [fitTarget.max_x, fitTarget.max_y],
+        [t.min_x, t.min_y],
+        [t.max_x, t.max_y],
       ],
-      { padding: 80, maxZoom: 17, duration: 700 },
+      { padding: 80, maxZoom: 18, duration: 600 },
     );
+  }, []);
+
+  // Re-fit when the target changes on an already-loaded map (e.g. the Studio
+  // map switching to a fresh preview). Initial fit is driven by `onLoad` below,
+  // which — unlike a ref read on mount — can't miss the map-ready moment.
+  useEffect(() => {
+    const map = mapRef.current?.getMap();
+    if (map?.loaded()) fitToTarget();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitKey]);
 
@@ -105,6 +120,7 @@ export function MapCanvas({ footprints, selectedPaths, preview }: MapCanvasProps
         attributionControl={false}
         initialViewState={{ longitude: 0, latitude: 18, zoom: 1.4 }}
         mapStyle={LIGHT_STYLE}
+        onLoad={fitToTarget}
         onMouseMove={(e) =>
           setHover({ lng: e.lngLat.lng, lat: e.lngLat.lat, zoom: e.target.getZoom() })
         }
