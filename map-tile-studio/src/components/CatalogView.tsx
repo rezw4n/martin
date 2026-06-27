@@ -16,11 +16,13 @@ import {
   Search,
   Trash2,
   Upload,
+  Wand2,
 } from 'lucide-react';
 import {
   deleteMaps,
-  importMaps,
+  importMapFile,
   listMaps,
+  pickImportFiles,
   revealInExplorer,
   tileThumbUrl,
   tileUrlTemplate,
@@ -100,10 +102,12 @@ function relTime(unixSecs: number): string {
 
 export function CatalogView({
   onOpenInStudio,
+  onProcessInStudio,
   tileBase,
   gdalReady,
 }: {
   onOpenInStudio?: () => void;
+  onProcessInStudio?: (paths: string[]) => void;
   tileBase: string;
   gdalReady?: boolean;
 }) {
@@ -161,8 +165,16 @@ export function CatalogView({
   const onImport = async () => {
     setBusy(true);
     try {
-      const n = await importMaps();
-      if (n) await load();
+      const paths = await pickImportFiles();
+      if (!paths.length) return;
+      const tiffs = paths.filter((p) => /\.tiff?$/i.test(p));
+      const maps = paths.filter((p) => /\.mbtiles$/i.test(p));
+      // Ready tile maps are copied into the catalog…
+      for (const p of maps) await importMapFile(p);
+      if (maps.length) await load();
+      // …while GeoTIFFs go straight to the Studio as source imagery (no copy),
+      // exactly like adding them there directly.
+      if (tiffs.length) onProcessInStudio?.(tiffs);
     } finally {
       setBusy(false);
     }
@@ -228,8 +240,8 @@ export function CatalogView({
             <Button onClick={load} size="sm" variant="ghost">
               <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
             </Button>
-            <Button busy={busy} onClick={onImport} size="sm" variant="primary">
-              <Upload className="size-4" /> Import tile map
+            <Button busy={busy} onClick={onImport} size="sm" variant="primary" title="Import a tile map (.mbtiles), or a GeoTIFF to process in Studio">
+              <Upload className="size-4" /> Import
             </Button>
           </>
         )}
@@ -359,7 +371,12 @@ export function CatalogView({
       {/* preview overlay */}
       <AnimatePresence>
         {preview && (
-          <PreviewOverlay entry={preview} onClose={() => setPreview(null)} tileBase={tileBase} />
+          <PreviewOverlay
+            entry={preview}
+            onClose={() => setPreview(null)}
+            onProcessInStudio={onProcessInStudio}
+            tileBase={tileBase}
+          />
         )}
       </AnimatePresence>
 
@@ -437,14 +454,18 @@ function ConfirmDelete({
 function PreviewOverlay({
   entry,
   onClose,
+  onProcessInStudio,
   tileBase,
 }: {
   entry: MapEntry;
   onClose: () => void;
+  onProcessInStudio?: (paths: string[]) => void;
   tileBase: string;
 }) {
   const pv = entryPreview(tileBase, entry);
   const url = entryTileUrl(tileBase, entry);
+  // A GeoTIFF that can't be served as tiles can still be turned into one in Studio.
+  const isTiff = /\.tiff?$/i.test(entry.path);
   return (
     <motion.div
       animate={{ opacity: 1 }}
@@ -491,19 +512,35 @@ function PreviewOverlay({
           <MapCanvas footprints={[]} preview={pv} selectedPaths={new Set()} />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 bg-canvas text-center">
-            <div className="flex size-16 items-center justify-center rounded-2xl bg-[#eef2f5]">
-              <Layers className="size-7 text-[#9aa6b6]" />
+            <div className="flex size-16 items-center justify-center rounded-2xl bg-brand-tint">
+              <Wand2 className="size-7 text-brand" />
             </div>
             <div>
-              <div className="font-semibold text-[14px] text-ink">No preview available</div>
-              <div className="mt-1 max-w-sm text-[12.5px] leading-relaxed text-muted">
-                Couldn't read tiles for this file (it may not be a web-mercator tile map). Open it in
-                a desktop GIS (QGIS, ArcGIS) instead.
+              <div className="font-semibold text-[14px] text-ink">
+                {isTiff ? 'This GeoTIFF needs processing' : 'No preview available'}
+              </div>
+              <div className="mt-1 max-w-md text-[12.5px] leading-relaxed text-muted">
+                {isTiff
+                  ? "It isn't a web-mercator tile map yet, so it can't be served directly. Send it to the Studio to turn it into a tile map or a Cloud-Optimized GeoTIFF."
+                  : "Couldn't read tiles for this file (it may not be a web-mercator tile map). Open it in a desktop GIS (QGIS, ArcGIS) instead."}
               </div>
             </div>
-            <Button onClick={() => revealInExplorer(entry.path)} variant="secondary">
-              <FolderOpen className="size-4" /> Reveal file
-            </Button>
+            <div className="mt-1 flex items-center gap-2.5">
+              {isTiff && onProcessInStudio && (
+                <Button
+                  onClick={() => {
+                    onProcessInStudio([entry.path]);
+                    onClose();
+                  }}
+                  variant="primary"
+                >
+                  <Wand2 className="size-4" /> Process in Studio
+                </Button>
+              )}
+              <Button onClick={() => revealInExplorer(entry.path)} variant="secondary">
+                <FolderOpen className="size-4" /> Reveal file
+              </Button>
+            </div>
           </div>
         )}
       </div>

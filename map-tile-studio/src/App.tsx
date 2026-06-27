@@ -307,6 +307,10 @@ export default function App() {
             <CatalogView
               gdalReady={gdal?.available}
               onOpenInStudio={() => setTab('studio')}
+              onProcessInStudio={(paths) => {
+                void addPaths(paths);
+                setTab('studio');
+              }}
               tileBase={tileBase}
             />
           )}

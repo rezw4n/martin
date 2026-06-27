@@ -76,19 +76,21 @@ export function tileUrlTemplate(base: string, sourceId: string): string {
 export const listMaps = () => invoke<MapEntry[]>('list_maps');
 export const deleteMaps = (paths: string[]) => invoke<void>('delete_maps', { paths });
 
-/** Native picker → copies the chosen tile map(s) into the output folder. */
-export async function importMaps(): Promise<number> {
+/** Native picker for catalog import — existing tile maps (.mbtiles) or GeoTIFFs.
+ *  Returns the chosen absolute paths (no copying happens here). */
+export async function pickImportFiles(): Promise<string[]> {
   const sel = await open({
     multiple: true,
     directory: false,
-    title: 'Import tile map',
-    filters: [{ name: 'Tile map', extensions: ['mbtiles', 'tif', 'tiff'] }],
+    title: 'Import tile map or imagery',
+    filters: [{ name: 'Tile map or GeoTIFF', extensions: ['mbtiles', 'tif', 'tiff'] }],
   });
-  if (!sel) return 0;
-  const paths = Array.isArray(sel) ? sel : [sel];
-  for (const p of paths) await invoke('import_map', { path: p });
-  return paths.length;
+  if (!sel) return [];
+  return Array.isArray(sel) ? sel : [sel];
 }
+
+/** Copy an existing, ready-to-serve tile map (.mbtiles) into the catalog folder. */
+export const importMapFile = (path: string) => invoke<string>('import_map', { path });
 
 /* ── PostGIS data sources ─────────────────────────────────────────────── */
 /** Connections + discovered vector sources, in one call (for the catalog). */
