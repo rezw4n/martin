@@ -650,18 +650,21 @@ function ImportDialog({
             />
           </Field>
         </div>
-        <Field label="Source CRS override" hint="optional — only if the file lacks a .prj">
+        <Field label="Source CRS override" hint="optional — usually not needed">
           <TextInput
             mono
             onChange={(e) => setSrcSrs(e.target.value)}
-            placeholder="e.g. EPSG:3857"
+            placeholder="e.g. EPSG:3857 (leave blank to auto-detect)"
             value={srcSrs}
           />
         </Field>
         <p className="rounded-[10px] bg-[#f6f9ff] px-3 py-2.5 text-[12px] leading-relaxed text-muted">
           The data is reprojected to <span className="font-semibold text-ink">EPSG:4326</span> on
-          import and served as Web-Mercator vector tiles — so it lines up correctly no matter the
-          original projection.
+          import and served as Web-Mercator vector tiles. The source projection is read from the
+          file's <span className="font-mono text-[11px]">.prj</span> (the correct Bangladesh /
+          Everest datum shift is applied automatically); a shapefile with no{' '}
+          <span className="font-mono text-[11px]">.prj</span> borrows the projection from others in
+          the same folder. Use the override only for an unusual case.
         </p>
         {error && (
           <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-[10px] border border-[#f4c7c4] bg-danger-tint px-3 py-2.5 text-[11.5px] text-[#b42318]">

@@ -391,6 +391,12 @@ async fn build_cog(
         format!("COMPRESS={compress}"),
         "-co".to_string(),
         "SPARSE_OK=TRUE".to_string(),
+        // Large imagery (and the COG driver's internal reprojected temp) can exceed
+        // the 4 GB classic-TIFF limit; force BigTIFF so big inputs don't fail with
+        // "TIFFAppendToStrip:Maximum TIFF file size exceeded". The COG reader
+        // (tiff crate) and GDAL both read BigTIFF.
+        "-co".to_string(),
+        "BIGTIFF=YES".to_string(),
         "-co".to_string(),
         format!("OVERVIEW_RESAMPLING={}", cog_overview_resampling(opts.resampling)),
     ];

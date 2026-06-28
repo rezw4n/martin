@@ -6,7 +6,8 @@
 //! registry and the on-disk config. Heavy/blocking work is moved off the async
 //! runtime with `spawn_blocking` (the registry's own runtime uses `block_on`).
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use martin_core::tiles::postgres::PostgresPool;
@@ -135,6 +136,131 @@ async fn alter_role_password(old: &PgConnection, new_password: &str) -> Result<(
 /// Load the on-disk config (always with a bundled entry present).
 fn load_cfg(state: &AppState) -> PgConfig {
     PgConfig::load(&config_path_for(&state.output_dir))
+}
+
+/* ── source CRS resolution (so reprojection lands data correctly) ─────────── */
+
+/// EPSG Gulshan 303 -> WGS 84 geocentric translation (the standard Bangladesh
+/// Everest datum shift). Without it, Everest-based local grids land ~300 m off.
+const BD_TOWGS84: &str = "+towgs84=283.729,735.942,261.143";
+
+/// Read the source CRS of `target` (a dataset or a `.prj`) as a PROJ.4 string,
+/// using the bundled GDAL (`gdalsrsinfo`). Returns `None` when there is no CRS.
+fn proj4_of(srsinfo: &Path, target: &Path, env: &BTreeMap<String, String>) -> Option<String> {
+    let mut cmd = std::process::Command::new(srsinfo);
+    cmd.arg("-o").arg("proj4").arg(target);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.stdout(Stdio::piped()).stderr(Stdio::null()).output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("+proj="))
+        .map(str::to_string)
+}
+
+/// True if a PROJ.4 string uses an Everest ellipsoid — by `+ellps=evrst*` OR by
+/// the numeric semi-major axes GDAL emits when it can't name the ellipsoid
+/// (`+a=6377276.345` etc., the various Everest 1830 definitions).
+fn is_everest(proj4_lc: &str) -> bool {
+    proj4_lc.contains("evrst")
+        || ["+a=6377276", "+a=6377298", "+a=6377299", "+a=6377301", "+a=6377304"]
+            .iter()
+            .any(|a| proj4_lc.contains(a))
+}
+
+/// True if the PROJ.4 already carries a *real* datum transformation: a named
+/// `+datum=`, or a `+towgs84=` with at least one non-zero component (GDAL can
+/// emit an identity `+towgs84=0,0,0,0,0,0,0`, which is NOT a transformation).
+fn has_real_datum_shift(proj4_lc: &str) -> bool {
+    if proj4_lc.contains("+datum=") {
+        return true;
+    }
+    proj4_lc
+        .split("+towgs84=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .is_some_and(|nums| {
+            nums.split(',').any(|n| n.trim().parse::<f64>().is_ok_and(|v| v != 0.0))
+        })
+}
+
+/// Central meridian (`+lon_0`) of a PROJ.4 string, if any.
+fn lon_0_of(proj4: &str) -> Option<f64> {
+    proj4
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("+lon_0=").and_then(|v| v.parse::<f64>().ok()))
+}
+
+/// Inject the Bangladesh datum shift into a PROJ.4 string when it uses an Everest
+/// ellipsoid, carries no real datum transformation, and is centred over Bangladesh
+/// (so Indian/Nepali Everest grids aren't mis-shifted). Returns the string
+/// unchanged when no fix is needed.
+fn with_bd_datum_shift(proj4: &str) -> String {
+    let lc = proj4.to_lowercase();
+    // No `+lon_0` (e.g. a geographic CRS) → assume Bangladesh (fail-open).
+    let over_bangladesh = lon_0_of(proj4).is_none_or(|l| (86.0..=94.0).contains(&l));
+    if is_everest(&lc) && !has_real_datum_shift(&lc) && over_bangladesh {
+        // Drop any identity +towgs84 first, then append the real shift.
+        let cleaned: Vec<&str> = proj4
+            .split_whitespace()
+            .filter(|t| !t.to_lowercase().starts_with("+towgs84="))
+            .collect();
+        format!("{} {BD_TOWGS84}", cleaned.join(" "))
+    } else {
+        proj4.to_string()
+    }
+}
+
+/// Outcome of resolving an import's source CRS.
+enum SrsResolution {
+    /// The file has a usable CRS already; let `ogr2ogr` read it (no `-s_srs`).
+    UseFileCrs,
+    /// Use this PROJ.4 as `-s_srs` (Everest fix, or a borrowed sibling CRS).
+    Override(String),
+    /// The file has no CRS and no sibling `.prj` to infer one from.
+    NoCrs,
+    /// The file has no CRS and the folder mixes projections (can't infer one).
+    Ambiguous,
+}
+
+/// Decide how to source the CRS for `input`:
+/// 1. If the file has a CRS, only override it when an Everest datum shift is needed.
+/// 2. If it has **no** CRS (a `.shp` with no `.prj`), borrow a sibling `.prj` from
+///    the same folder — but only when every sibling agrees on one CRS.
+fn resolve_source_srs(srsinfo: &Path, input: &Path, env: &BTreeMap<String, String>) -> SrsResolution {
+    if let Some(p4) = proj4_of(srsinfo, input, env) {
+        let fixed = with_bd_datum_shift(&p4);
+        return if fixed == p4 { SrsResolution::UseFileCrs } else { SrsResolution::Override(fixed) };
+    }
+    // No CRS on the input — gather the DISTINCT CRSs of sibling .prj files.
+    let Some(dir) = input.parent() else { return SrsResolution::NoCrs };
+    let Ok(entries) = std::fs::read_dir(dir) else { return SrsResolution::NoCrs };
+    let mut distinct: Vec<String> = Vec::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        let is_prj = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("prj"));
+        if is_prj {
+            if let Some(p4) = proj4_of(srsinfo, &path, env) {
+                if !distinct.contains(&p4) {
+                    distinct.push(p4);
+                }
+            }
+        }
+    }
+    match distinct.as_slice() {
+        [] => SrsResolution::NoCrs,
+        [one] => SrsResolution::Override(with_bd_datum_shift(one)),
+        _ => SrsResolution::Ambiguous,
+    }
 }
 
 /* ── commands ────────────────────────────────────────────────────────────── */
@@ -347,12 +473,42 @@ pub async fn pg_import(
             .map_err(|e| format!("Could not start bundled PostgreSQL: {e}"))?;
     }
 
-    // Locate ogr2ogr + the GDAL environment (for reprojection data).
-    let (ogr, gdal_env) = {
+    // Locate ogr2ogr + gdalsrsinfo + the GDAL environment (for reprojection data).
+    let (ogr, srsinfo, gdal_env) = {
         let guard = state.gdal.lock().map_err(|_| "GDAL state poisoned")?;
         let g = guard.as_ref().map_err(|e| format!("GDAL unavailable: {e}"))?;
-        (g.tool("ogr2ogr"), g.env.clone())
+        (g.tool("ogr2ogr"), g.tool("gdalsrsinfo"), g.env.clone())
     };
+
+    // Resolve the source CRS: an explicit override wins; otherwise read it from the
+    // file (or a sibling .prj in the same folder) and inject the Bangladesh datum
+    // shift for Everest grids that ship without one — so the data lands in the
+    // right place regardless of the (often custom / header-less) projection.
+    let effective_s_srs: Option<String> =
+        if let Some(s) = params.src_srs.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s.to_string())
+        } else {
+            let (si, input, env) = (srsinfo.clone(), PathBuf::from(&params.path), gdal_env.clone());
+            let res = tokio::task::spawn_blocking(move || resolve_source_srs(&si, &input, &env))
+                .await
+                .map_err(|e| e.to_string())?;
+            match res {
+                SrsResolution::UseFileCrs => None,
+                SrsResolution::Override(s) => Some(s),
+                SrsResolution::NoCrs => {
+                    return Err("This file has no projection (.prj) and none could be inferred \
+                                from the folder. Set a Source CRS (e.g. EPSG:3857) in the import \
+                                dialog and try again."
+                        .to_string());
+                }
+                SrsResolution::Ambiguous => {
+                    return Err("This shapefile has no .prj, and the folder mixes shapefiles in \
+                                different projections — so the CRS can't be inferred. Set a Source \
+                                CRS explicitly in the import dialog."
+                        .to_string());
+                }
+            }
+        };
 
     // Quote each field libpq-style so spaces / symbols in a password (or any value)
     // don't break the DSN or inject extra keywords. Port is numeric.
@@ -391,9 +547,9 @@ pub async fn pg_import(
         "YES".into(),
         "-overwrite".into(),
     ];
-    if let Some(srs) = params.src_srs.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(s) = &effective_s_srs {
         args.push("-s_srs".into());
-        args.push(srs.to_string());
+        args.push(s.clone());
     }
 
     // Run ogr2ogr off the async runtime.
@@ -486,4 +642,67 @@ pub async fn pg_drop_source(state: State<'_, AppState>, source_id: String) -> Re
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_real_datum_shift, is_everest, lon_0_of, with_bd_datum_shift, BD_TOWGS84};
+
+    #[test]
+    fn everest_detected_by_name_and_axis() {
+        assert!(is_everest("+proj=tmerc +ellps=evrst30 +units=m"));
+        // GDAL's numeric form for the various Everest 1830 definitions.
+        assert!(is_everest("+proj=tmerc +a=6377276.345 +rf=300.802 +units=m"));
+        assert!(is_everest("+proj=cass +a=6377299.36 +rf=300.8017 +units=m"));
+        assert!(is_everest("+proj=tmerc +a=6377301.243 +rf=300.8017255"));
+        assert!(!is_everest("+proj=longlat +datum=wgs84"));
+        assert!(!is_everest("+proj=utm +zone=46 +a=6378137 +rf=298.257223563"));
+    }
+
+    #[test]
+    fn real_vs_identity_datum_shift() {
+        assert!(has_real_datum_shift("+proj=longlat +datum=wgs84 +no_defs"));
+        assert!(has_real_datum_shift("+ellps=evrst30 +towgs84=283.729,735.942,261.143"));
+        // An identity towgs84 is NOT a real transformation.
+        assert!(!has_real_datum_shift("+ellps=evrst30 +towgs84=0,0,0,0,0,0,0"));
+        assert!(!has_real_datum_shift("+ellps=evrst30 +towgs84=0,0,0"));
+        assert!(!has_real_datum_shift("+proj=tmerc +ellps=evrst30 +units=m"));
+    }
+
+    #[test]
+    fn lon0_parsing() {
+        assert_eq!(lon_0_of("+proj=tmerc +lon_0=90.5 +ellps=evrst30"), Some(90.5));
+        assert_eq!(lon_0_of("+proj=longlat +ellps=evrst30"), None);
+    }
+
+    #[test]
+    fn injects_for_bangladesh_everest() {
+        // Canonical Gulshan 303 (named ellipsoid).
+        let canonical = "+proj=tmerc +lat_0=24.5 +lon_0=90.5 +k=1 +x_0=100000 +y_0=200000 +ellps=evrst30 +units=m +no_defs";
+        let out = with_bd_datum_shift(canonical);
+        assert!(out.contains(BD_TOWGS84), "named ellipsoid must get the shift: {out}");
+
+        // Variant flattening → numeric axis, still over Bangladesh.
+        let numeric = "+proj=tmerc +lat_0=24.5 +lon_0=90.5 +a=6377276.345 +rf=300.802 +units=m +no_defs";
+        assert!(with_bd_datum_shift(numeric).contains(BD_TOWGS84));
+
+        // Identity towgs84 is stripped and the real shift applied (no duplicate).
+        let identity = "+proj=tmerc +lon_0=90 +ellps=evrst30 +towgs84=0,0,0,0,0,0,0 +no_defs";
+        let fixed = with_bd_datum_shift(identity);
+        assert!(fixed.contains(BD_TOWGS84));
+        assert!(!fixed.contains("towgs84=0,0,0"), "identity shift must be removed: {fixed}");
+    }
+
+    #[test]
+    fn leaves_correct_or_non_bangladesh_crs_untouched() {
+        // Already has the real shift → unchanged.
+        let ok = "+proj=tmerc +lon_0=90.5 +ellps=evrst30 +towgs84=283.729,735.942,261.143 +no_defs";
+        assert_eq!(with_bd_datum_shift(ok), ok);
+        // Proper WGS84 → unchanged.
+        let wgs = "+proj=longlat +datum=WGS84 +no_defs";
+        assert_eq!(with_bd_datum_shift(wgs), wgs);
+        // Everest but centred over India (lon_0=80) → not Bangladesh → unchanged.
+        let india = "+proj=tmerc +lat_0=0 +lon_0=80 +ellps=evrst30 +units=m +no_defs";
+        assert_eq!(with_bd_datum_shift(india), india);
+    }
 }
