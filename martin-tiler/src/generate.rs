@@ -381,6 +381,18 @@ async fn build_cog(
     let mut args = vec![
         "-of".to_string(),
         "COG".to_string(),
+        // Use every core for the internal reprojection/warp, and a large block
+        // cache so the source isn't re-read from disk repeatedly. (Roughly halves
+        // wall-clock on multi-core machines; more on large imagery.)
+        "--config".to_string(),
+        "GDAL_NUM_THREADS".to_string(),
+        "ALL_CPUS".to_string(),
+        "--config".to_string(),
+        "GDAL_CACHEMAX".to_string(),
+        "50%".to_string(),
+        // Multi-thread compression + overview building.
+        "-co".to_string(),
+        "NUM_THREADS=ALL_CPUS".to_string(),
         "-co".to_string(),
         "TILING_SCHEME=GoogleMapsCompatible".to_string(),
         // Align EVERY overview to the XYZ grid (GDAL aligns only the base level by
